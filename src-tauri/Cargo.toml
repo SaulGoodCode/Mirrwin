@@ -1,0 +1,26 @@
+[package]
+name = "airplay-mirror"
+version = "0.1.0"
+description = "Mirrwin — Windows screen mirroring receiver (Tauri 2)"
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "airplay_mirror_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+base64 = "0.22"
+# FFI bridge to the native AirPlay protocol DLL (xenos1337/AirPlayServer style).
+# We load the C library at runtime, start the receiver via its C ABI, and read
+# the decrypted H.264 it muxes to a named pipe (rendered by WebCodecs in the UI).
+libloading = "0.8"
+
+[features]
+default = []

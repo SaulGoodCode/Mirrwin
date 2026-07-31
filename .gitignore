@@ -1,0 +1,26 @@
+# Dependencies
+/node_modules
+package-lock.json.bak
+
+# Frontend build output
+/dist
+
+# Rust / Tauri build output
+/src-tauri/target
+
+# Tauri-generated schemas (regenerated on build)
+/src-tauri/gen/schemas
+
+# Local Claude Code settings
+.claude/settings.local.json
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp

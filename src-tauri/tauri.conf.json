@@ -1,0 +1,42 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Mirrwin",
+  "version": "0.1.0",
+  "identifier": "com.mirrwin.app",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Mirrwin",
+        "label": "main",
+        "width": 960,
+        "height": 820,
+        "minWidth": 720,
+        "minHeight": 640,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "resources": ["./resources/ffmpeg"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.png",
+      "icons/icon.ico"
+    ],
+    "shortDescription": "Windows 手机投屏接收器",
+    "longDescription": "Mirrwin —— 在 Windows 上接收手机投屏。当前支持 iPhone / iPad 的 AirPlay 屏幕镜像（后端原生协议库出 H.264，前端 WebCodecs 硬件解码渲染），后续将加入 Android 投屏。"
+  }
+}

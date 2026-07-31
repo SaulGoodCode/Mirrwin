@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#5B6EE1"/>
+      <stop offset="100%" stop-color="#34E3C5"/>
+    </linearGradient>
+    <linearGradient id="phone" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#F5F6FA"/>
+      <stop offset="100%" stop-color="#D8DCE3"/>
+    </linearGradient>
+    <linearGradient id="screen" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#3A4A6B"/>
+      <stop offset="100%" stop-color="#1B2540"/>
+    </linearGradient>
+    <linearGradient id="disp" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#FFFFFF"/>
+      <stop offset="100%" stop-color="#E8ECF2"/>
+    </linearGradient>
+  </defs>
+
+  <!-- App icon rounded square background -->
+  <rect width="1024" height="1024" rx="228" ry="228" fill="url(#bg)"/>
+
+  <!-- Phone body -->
+  <rect x="276" y="128" width="472" height="768" rx="80" ry="80" fill="url(#phone)"/>
+
+  <!-- Phone screen -->
+  <rect x="312" y="186" width="400" height="652" rx="40" ry="40" fill="url(#screen)"/>
+
+  <!-- Display / TV icon on screen -->
+  <rect x="388" y="336" width="248" height="156" rx="18" ry="18" fill="url(#disp)"/>
+  <!-- Inner display bezel -->
+  <rect x="404" y="352" width="216" height="116" rx="8" ry="8" fill="#2A3A5C"/>
+  <!-- AirPlay triangle -->
+  <polygon points="512,374 576,422 448,422" fill="#5B6EE1"/>
+  <!-- Display stand neck -->
+  <rect x="502" y="492" width="20" height="24" rx="3" ry="3" fill="url(#disp)"/>
+  <!-- Display stand base -->
+  <rect x="452" y="516" width="120" height="14" rx="6" ry="6" fill="url(#disp)"/>
+
+  <!-- Casting signal waves -->
+  <path d="M 468 292 Q 512 258 556 292" stroke="white" stroke-width="10" stroke-linecap="round" fill="none" opacity="0.9"/>
+  <path d="M 444 312 Q 512 272 580 312" stroke="white" stroke-width="7" stroke-linecap="round" fill="none" opacity="0.55"/>
+</svg>
