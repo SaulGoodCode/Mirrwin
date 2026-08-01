@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { onMounted, onUnmounted, ref } from 'vue'
 import { toast } from 'vue-sonner'
 import { Button } from '@/components/ui/button'
 import { Settings as SettingsIcon, Radio, Square } from 'lucide-vue-next'
@@ -11,11 +11,28 @@ import SettingsDialog from '@/components/SettingsDialog.vue'
 const { status, start, stop, refresh } = useReceiver()
 const settingsOpen = ref(false)
 const starting = ref(false)
+// Startup readiness gate. Loading the native protocol DLL during the first
+// couple of seconds after launch (while the app/WebView2 is still initializing)
+// crashes the process; the same load is safe once things settle. So we block
+// "开始接收" briefly on startup — this automates the "wait a few seconds"
+// workaround. Tune READY_DELAY_MS if a slow machine still crashes on first click.
+const ready = ref(false)
+const READY_DELAY_MS = 3500
+let readyTimer: number | null = null
 
-onMounted(refresh)
+onMounted(() => {
+  refresh()
+  readyTimer = window.setTimeout(() => {
+    ready.value = true
+  }, READY_DELAY_MS)
+})
+
+onUnmounted(() => {
+  if (readyTimer != null) window.clearTimeout(readyTimer)
+})
 
 async function onStart() {
-  if (starting.value) return
+  if (starting.value || !ready.value) return
   starting.value = true
   try {
     await start({
@@ -55,8 +72,8 @@ async function onSaveSettings(opts: { deviceName: string; port: number; saveDir:
     <div class="flex items-center justify-between shrink-0">
       <h1 class="text-xl font-bold tracking-tight">AirPlay Mirror</h1>
       <div class="flex items-center gap-2">
-        <Button v-if="!status.running" size="sm" :disabled="starting" @click="onStart">
-          <Radio class="h-4 w-4" /> {{ starting ? '启动中…' : '开始接收' }}
+        <Button v-if="!status.running" size="sm" :disabled="starting || !ready" @click="onStart">
+          <Radio class="h-4 w-4" /> {{ !ready ? '初始化中…' : starting ? '启动中…' : '开始接收' }}
         </Button>
         <Button v-else size="sm" variant="destructive" @click="onStop">
           <Square class="h-4 w-4" /> 停止
