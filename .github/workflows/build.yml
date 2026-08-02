@@ -1,13 +1,12 @@
 name: build
 
 # Build the Windows app on GitHub's servers.
-# - Every push to main (or manual run) → builds and uploads the installer as a
-#   downloadable artifact on the workflow run page.
-# - Pushing a version tag like v0.1.0 → additionally publishes a GitHub Release
-#   with the installer attached.
+# - Only a version tag like v0.1.0 triggers a build; it uploads the installer as
+#   a downloadable artifact AND publishes a GitHub Release with it attached.
+# - Pushing to main does NOT build. You can also start a build manually from the
+#   Actions tab (Run workflow).
 on:
   push:
-    branches: [main]
     tags: ['v*']
   workflow_dispatch:
 
