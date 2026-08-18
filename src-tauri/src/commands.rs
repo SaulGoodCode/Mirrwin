@@ -46,6 +46,7 @@ pub fn read_status(state: &Arc<AppState>) -> ReceiverStatus {
         demo: *state.demo.lock().unwrap(),
         save_dir: state.save_dir.lock().unwrap().clone(),
         mirror_lib_present: *state.mirror_lib_present.lock().unwrap(),
+        enable_audio: *state.enable_audio.lock().unwrap(),
     }
 }
 
@@ -57,6 +58,7 @@ pub fn emit_status(app: &AppHandle, state: &Arc<AppState>) {
 pub async fn start_mirror(
     options: StartOptions,
     frame_channel: Channel<Vec<u8>>,
+    audio_channel: Channel<Vec<u8>>,
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<ReceiverStatus, String> {
@@ -77,6 +79,9 @@ pub async fn start_mirror(
         if !dir.is_empty() {
             *state.save_dir.lock().unwrap() = dir;
         }
+    }
+    if let Some(a) = options.enable_audio {
+        *state.enable_audio.lock().unwrap() = a;
     }
 
     let demo = *state.demo.lock().unwrap();
@@ -106,6 +111,13 @@ pub async fn start_mirror(
     let width = options.width.unwrap_or(0);
     let height = options.height.unwrap_or(0);
     let fps = options.fps.unwrap_or(0);
+    // The frontend always opens an audio channel; handing it to the FFI layer
+    // is what actually turns audio on, so a disabled session costs nothing.
+    let audio = if *state.enable_audio.lock().unwrap() {
+        Some(audio_channel)
+    } else {
+        None
+    };
 
     // Re-entrancy guard: block concurrent starts that would double-load the
     // native DLL and corrupt its global server handle (a crash source).
@@ -123,6 +135,7 @@ pub async fn start_mirror(
         height,
         fps,
         frame_channel,
+        audio,
         app.clone(),
     )?;
 

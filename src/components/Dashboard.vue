@@ -39,6 +39,7 @@ async function onStart() {
       deviceName: status.value.deviceName,
       port: status.value.port,
       saveDir: status.value.saveDir,
+      enableAudio: status.value.enableAudio,
     })
   } catch (e) {
     toast.error(`启动失败：${String(e)}`)
@@ -51,15 +52,16 @@ async function onStop() {
   await stop()
 }
 
-async function onSaveSettings(opts: { deviceName: string; port: number; saveDir: string; width: number; height: number; fps: number }) {
+async function onSaveSettings(opts: { deviceName: string; port: number; saveDir: string; width: number; height: number; fps: number; enableAudio: boolean }) {
   const wasRunning = status.value.running
   if (wasRunning) stop()
   status.value.deviceName = opts.deviceName
   status.value.port = opts.port
   status.value.saveDir = opts.saveDir
+  status.value.enableAudio = opts.enableAudio
   if (wasRunning) {
     try {
-      await start({ deviceName: opts.deviceName, port: opts.port, saveDir: opts.saveDir, width: opts.width, height: opts.height, fps: opts.fps })
+      await start({ deviceName: opts.deviceName, port: opts.port, saveDir: opts.saveDir, width: opts.width, height: opts.height, fps: opts.fps, enableAudio: opts.enableAudio })
     } catch (e) {
       toast.error(`启动失败：${String(e)}`)
     }

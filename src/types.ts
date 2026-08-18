@@ -20,8 +20,10 @@ export interface ReceiverStatus {
   demo: boolean
   /** Directory screenshots / recordings are saved to. */
   saveDir: string
-  /** Whether the native protocol+decode DLL was found (real mode usable). */
+  /** Whether the native protocol DLL was found (real mode usable). */
   mirrorLibPresent: boolean
+  /** Whether the device's audio is played alongside the picture. */
+  enableAudio: boolean
 }
 
 export interface StartOptions {
@@ -34,16 +36,6 @@ export interface StartOptions {
   width?: number
   height?: number
   fps?: number
-}
-
-/** A decoded YUV420 planar frame received over the binary channel. */
-export interface YuvFrame {
-  width: number
-  height: number
-  strideY: number
-  strideU: number
-  strideV: number
-  y: Uint8Array
-  u: Uint8Array
-  v: Uint8Array
+  /** Play the device's audio too (default off). */
+  enableAudio?: boolean
 }

@@ -24,6 +24,10 @@ typedef void (*video_cb)(const uint8_t* data, int len, int frame_type);
 // event: 0 = connected, 1 = disconnected
 typedef void (*state_cb)(int event, const char* remote_name, const char* device_id);
 
+// 交错 PCM，已由协议库的 fdk-aac 解出；传 NULL 表示不要音频
+typedef void (*audio_cb)(const uint8_t* pcm, int len, int sample_rate, int channels,
+                         int bits_per_sample);
+
 typedef struct {
     const char*  server_name;   // iPhone「屏幕镜像」里显示的设备名
     unsigned int raop_port;     // RAOP（音频）端口
@@ -32,14 +36,18 @@ typedef struct {
     int width, height, fps;     // 保留字段，当前忽略（始终用设备原生流）
 } mirror_cfg;
 
-int  mirror_start_ex(const mirror_cfg* cfg, video_cb vcb, state_cb scb);
+int  mirror_start_av(const mirror_cfg* cfg, video_cb vcb, state_cb scb, audio_cb acb);
 void mirror_stop(void);
 ```
+
+> **签名变了就改名**：这个导出曾叫 `mirror_start`（YUV 回调）、`mirror_start_ex`（无音频）。
+> 每次参数表变化都换新名字，这样新旧不匹配会在符号查找阶段**响亮失败**，而不是让宿主多压一个
+> 参数、被 DLL 当作垃圾指针调用。
 
 `ffi.rs` 里的 `#[repr(C)] MirrorCfg` 必须与上面**逐字节一致**（64 位下指针 8 字节、
 int/unsigned 4 字节）。
 
-### `mirror_start_ex` 返回码
+### `mirror_start_av` 返回码
 
 | 码 | 含义 | `ffi.rs` 给用户的提示 |
 | --- | --- | --- |
@@ -64,6 +72,19 @@ int/unsigned 4 字节）。
 - `frame_type` 沿用上游 `h264_decode_struct::frame_type` 的语义。注意它**不是**关键帧标志：
   上游 `raop_rtp_mirror.c` 里 `frame_type = 0` 发的是 SPS/PPS 参数集，`= 1` 才是图像数据。
 
+### 音频
+
+音频是**可选的**，默认关闭：`acb` 传 NULL 时 DLL 完全不走 PCM 路径。
+
+与视频不同，音频**确实**经过上游的 `IAirServerCallback::outputAudio`，因此不需要改上游代码。
+协议库用内置的 fdk-aac 把 AAC 解成 PCM 再交出来，实测形态是 **16 位有符号小端、480 帧/包
+（1920 字节）**，采样率与声道数由解码器上报（`aacDecoder_GetStreamInfo`），随包给出而不是
+只报一次 —— 8 字节头相对 2KB 负载可以忽略，却省掉了"格式永不变化"这个假设。
+
+Rust 侧（`ffi.rs::on_audio`）在每块 PCM 前加上小端头
+`[u32 sample_rate][u16 channels][u16 bits_per_sample]`，经独立的 Tauri `Channel` 送到前端，
+由 `src/lib/pcmPlayer.ts` 用 AudioWorklet 播放。
+
 ## 断开检测
 
 iPhone 停止投屏时，协议栈会走到 `raop_rtp_mirror_stop()`，它对**两种情况**都触发
@@ -73,7 +94,7 @@ iPhone 停止投屏时，协议栈会走到 `raop_rtp_mirror_stop()`，它对**�
 ## 已知坑（都已在 `ffi.rs` 里处理）
 
 - **不要卸载再重载 DLL**：它有全局状态和自己的线程，`FreeLibrary` 后重载会崩/卡。`ffi.rs`
-  用 `OnceLock` 只加载一次，靠 `mirror_start_ex`/`mirror_stop` 复用，实现停止/重开。
+  用 `OnceLock` 只加载一次，靠 `mirror_start_av`/`mirror_stop` 复用，实现停止/重开。
 - **加载路径含空格**：旧版本在带空格的目录下会卡死（`mirror_start` 永不返回），根因是随包的
   FFmpeg DLL 是 Cygwin 构建、会拉起 `msys-2.0.dll` 做路径转换。当前 DLL 已不依赖它们，实测
   带空格路径 15ms 加载完成，因此原先的 `resolve_space_free_dll`（8.3 短路径 / 复制到无空格
@@ -105,5 +126,5 @@ gcc -O2 -o smoke.exe tools/airplay-dll/smoke_test.c
 smoke.exe "C:\some dir\airplay2dll.dll" 7010 4
 ```
 
-它检查三件历史上出过问题的事：DLL 能否加载、`mirror_start_ex` 会不会卡住、以及带空格路径和
+它检查三件历史上出过问题的事：DLL 能否加载、`mirror_start_av` 会不会卡住、以及带空格路径和
 单进程内 start/stop/start/stop 是否都正常。

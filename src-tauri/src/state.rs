@@ -20,6 +20,8 @@ pub struct AppState {
     pub save_dir: Mutex<String>,
     /// Whether the native protocol DLL was located at startup.
     pub mirror_lib_present: Mutex<bool>,
+    /// Play the device's audio as well as its screen. Off by default.
+    pub enable_audio: Mutex<bool>,
 }
 
 impl Default for AppState {
@@ -35,6 +37,7 @@ impl Default for AppState {
             demo: Mutex::new(false),
             save_dir: Mutex::new(String::new()),
             mirror_lib_present: Mutex::new(false),
+            enable_audio: Mutex::new(false),
         }
     }
 }

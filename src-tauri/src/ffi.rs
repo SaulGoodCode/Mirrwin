@@ -14,6 +14,9 @@
 //! typedef void (*video_cb)(const uint8_t* data, int len, int frame_type);
 //! // event: 0 = connected, 1 = disconnected
 //! typedef void (*state_cb)(int event, const char* remote_name, const char* device_id);
+//! // interleaved PCM already decoded from AAC; null = audio off
+//! typedef void (*audio_cb)(const uint8_t* pcm, int len, int sample_rate, int channels,
+//!                          int bits_per_sample);
 //!
 //! typedef struct {
 //!     const char*  server_name;
@@ -23,13 +26,13 @@
 //!     int width, height, fps;   // reserved
 //! } mirror_cfg;
 //!
-//! int  mirror_start_ex(const mirror_cfg* cfg, video_cb vcb, state_cb scb);
+//! int  mirror_start_av(const mirror_cfg* cfg, video_cb vcb, state_cb scb, audio_cb acb);
 //! void mirror_stop(void);
 //! ```
 //!
-//! Both callbacks run on the DLL's network threads, so they must return
-//! promptly and must not hold a lock across a call back into the DLL. The
-//! `data` pointer is only valid for the duration of the call.
+//! All callbacks run on the DLL's network threads, so they must return promptly
+//! and must not hold a lock across a call back into the DLL. Their buffers are
+//! only valid for the duration of the call.
 
 use std::ffi::{c_char, CStr, CString};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
@@ -71,7 +74,7 @@ fn add_dll_dir(dir: &str) {
 /// We deliberately never unload it: this DLL keeps global/static server state
 /// and spawns its own worker threads, so `FreeLibrary`-then-reload on every
 /// stop/start is a crash and hang source. Loading once and calling
-/// `mirror_start_ex`/`mirror_stop` on the same instance lets the receiver be
+/// `mirror_start_av`/`mirror_stop` on the same instance lets the receiver be
 /// stopped and restarted cleanly within one session.
 static DLL: OnceLock<Library> = OnceLock::new();
 
@@ -105,6 +108,7 @@ fn load_dll(dll_path: &str) -> Result<&'static Library, String> {
 
 type VideoCb = unsafe extern "C" fn(*const u8, i32, i32);
 type StateCb = unsafe extern "C" fn(i32, *const c_char, *const c_char);
+type AudioCb = unsafe extern "C" fn(*const u8, i32, i32, i32, i32);
 
 /// Byte-for-byte match of `Bridge.cpp`'s `struct mirror_cfg`.
 #[repr(C)]
@@ -118,13 +122,17 @@ struct MirrorCfg {
     fps: i32,
 }
 
-type MirrorStartEx = unsafe extern "C" fn(*const MirrorCfg, VideoCb, StateCb) -> i32;
+/// `Option<AudioCb>` rather than a raw pointer: Rust's null-pointer
+/// optimisation makes `None` a null function pointer across the FFI boundary,
+/// which is exactly how the DLL is told to leave audio off.
+type MirrorStartAv =
+    unsafe extern "C" fn(*const MirrorCfg, VideoCb, StateCb, Option<AudioCb>) -> i32;
 type MirrorStop = unsafe extern "C" fn();
 
 const EVENT_CONNECTED: i32 = 0;
 const EVENT_DISCONNECTED: i32 = 1;
 
-/// Turn a `mirror_start_ex` return code into something the user can act on.
+/// Turn a `mirror_start_av` return code into something the user can act on.
 /// The codes are defined in `tools/airplay-dll/Bridge.cpp`; the two that a user
 /// can actually do something about are detected there specifically so they do
 /// not arrive here as a generic failure.
@@ -154,6 +162,8 @@ fn describe_start_error(rc: i32, port: u16) -> String {
 /// destination has to be reachable from a plain `extern "C" fn`.
 struct Sink {
     channel: Channel<Vec<u8>>,
+    /// Present only while audio is enabled for this session.
+    audio: Option<Channel<Vec<u8>>>,
     app: AppHandle,
 }
 
@@ -161,6 +171,9 @@ static SINK: RwLock<Option<Sink>> = RwLock::new(None);
 
 /// Per-session H.264 byte counter, for the first-frame log line only.
 static STREAM_BYTES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Bytes of the header `on_audio` puts in front of each PCM chunk.
+const AUDIO_HEADER_LEN: usize = 8;
 
 /// Called by the DLL for each H.264 access unit, on its network thread.
 /// `data` is freed as soon as this returns, so the bytes are copied here.
@@ -179,6 +192,40 @@ unsafe extern "C" fn on_video(data: *const u8, len: i32, frame_type: i32) {
         if let Ok(guard) = SINK.read() {
             if let Some(sink) = guard.as_ref() {
                 let _ = sink.channel.send(bytes);
+            }
+        }
+    });
+}
+
+/// Called by the DLL for each block of decoded PCM, on its network thread, and
+/// only when audio was enabled at start.
+///
+/// The format is carried per chunk rather than announced once: it is whatever
+/// the stream's AAC decoder reports, and re-sending eight bytes alongside a
+/// ~2 KB payload costs nothing next to assuming it never changes. Layout is
+/// little-endian `[u32 sample_rate][u16 channels][u16 bits_per_sample]`,
+/// followed by the interleaved samples.
+unsafe extern "C" fn on_audio(
+    pcm: *const u8,
+    len: i32,
+    sample_rate: i32,
+    channels: i32,
+    bits_per_sample: i32,
+) {
+    if pcm.is_null() || len <= 0 {
+        return;
+    }
+    let samples = std::slice::from_raw_parts(pcm, len as usize);
+    let mut msg = Vec::with_capacity(AUDIO_HEADER_LEN + samples.len());
+    msg.extend_from_slice(&(sample_rate.max(0) as u32).to_le_bytes());
+    msg.extend_from_slice(&(channels.clamp(0, u16::MAX as i32) as u16).to_le_bytes());
+    msg.extend_from_slice(&(bits_per_sample.clamp(0, u16::MAX as i32) as u16).to_le_bytes());
+    msg.extend_from_slice(samples);
+
+    guard_callback(move || {
+        if let Ok(guard) = SINK.read() {
+            if let Some(audio) = guard.as_ref().and_then(|s| s.audio.as_ref()) {
+                let _ = audio.send(msg);
             }
         }
     });
@@ -247,11 +294,11 @@ fn cstr_to_string(p: *const c_char) -> String {
     unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned()
 }
 
-/// Install the callback destination. Must happen before `mirror_start_ex`,
+/// Install the callback destination. Must happen before `mirror_start_av`,
 /// since the DLL may call back immediately.
-fn set_sink(channel: Channel<Vec<u8>>, app: AppHandle) {
+fn set_sink(channel: Channel<Vec<u8>>, audio: Option<Channel<Vec<u8>>>, app: AppHandle) {
     if let Ok(mut guard) = SINK.write() {
-        *guard = Some(Sink { channel, app });
+        *guard = Some(Sink { channel, audio, app });
     }
     STREAM_BYTES.store(0, std::sync::atomic::Ordering::Relaxed);
 }
@@ -272,7 +319,8 @@ fn clear_sink() {
 /// `port` is the AirPlay (`_airplay._tcp`) port the iPhone connects to for
 /// screen mirroring; RAOP audio uses `port - 1`. `width`/`height`/`fps` are
 /// accepted for ABI compatibility but the receiver always uses the device's
-/// native stream.
+/// native stream. Passing `None` for `audio_channel` leaves audio off, and the
+/// DLL then never enters its PCM path at all.
 #[allow(clippy::too_many_arguments)]
 pub fn start_mirror(
     dll_path: &str,
@@ -282,13 +330,14 @@ pub fn start_mirror(
     height: u32,
     fps: u32,
     channel: Channel<Vec<u8>>,
+    audio_channel: Option<Channel<Vec<u8>>>,
     app: AppHandle,
 ) -> Result<(), String> {
     let lib = load_dll(dll_path)?;
 
-    let start: Symbol<MirrorStartEx> = unsafe {
-        lib.get(b"mirror_start_ex\0").map_err(|_| {
-            "DLL 缺少导出符号 `mirror_start_ex`（协议库版本过旧，请用 \
+    let start: Symbol<MirrorStartAv> = unsafe {
+        lib.get(b"mirror_start_av\0").map_err(|_| {
+            "DLL 缺少导出符号 `mirror_start_av`（协议库版本过旧，请用 \
              tools/build-airplay-dll.sh 重新构建）"
                 .to_string()
         })?
@@ -299,9 +348,10 @@ pub fn start_mirror(
 
     let airplay_port = port as u32;
     let raop_port = port.saturating_sub(1) as u32;
+    let audio_on = audio_channel.is_some();
 
-    // Callbacks can fire before mirror_start_ex returns.
-    set_sink(channel, app);
+    // Callbacks can fire before mirror_start_av returns.
+    set_sink(channel, audio_channel, app);
 
     let cfg = MirrorCfg {
         server_name: c_name.as_ptr(),
@@ -314,11 +364,12 @@ pub fn start_mirror(
     };
 
     eprintln!(
-        "[ffi] mirror_start_ex: name='{device_name}' raop_port={raop_port} \
-         airplay_port={airplay_port} size={width}x{height}@{fps}"
+        "[ffi] mirror_start_av: name='{device_name}' raop_port={raop_port} \
+         airplay_port={airplay_port} size={width}x{height}@{fps} audio={audio_on}"
     );
-    let rc = unsafe { start(&cfg as *const MirrorCfg, on_video, on_state) };
-    eprintln!("[ffi] mirror_start_ex returned rc={rc}");
+    let acb: Option<AudioCb> = if audio_on { Some(on_audio) } else { None };
+    let rc = unsafe { start(&cfg as *const MirrorCfg, on_video, on_state, acb) };
+    eprintln!("[ffi] mirror_start_av returned rc={rc}");
     if rc != 0 {
         clear_sink();
         return Err(describe_start_error(rc, port));

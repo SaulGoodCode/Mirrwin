@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Separator } from '@/components/ui/separator'
+import { Switch } from '@/components/ui/switch'
 import { open as openDialog } from '@tauri-apps/plugin-dialog'
 import { invoke } from '@tauri-apps/api/core'
 import { toast } from 'vue-sonner'
@@ -13,7 +14,7 @@ import { useReceiver } from '@/composables/useReceiver'
 const props = defineProps<{ open: boolean }>()
 const emit = defineEmits<{
   'update:open': [v: boolean]
-  save: [opts: { deviceName: string; port: number; saveDir: string; width: number; height: number; fps: number }]
+  save: [opts: { deviceName: string; port: number; saveDir: string; width: number; height: number; fps: number; enableAudio: boolean }]
 }>()
 
 const { status } = useReceiver()
@@ -24,6 +25,7 @@ const saveDir = ref(status.value.saveDir)
 const width = ref(0)
 const height = ref(0)
 const fps = ref(0)
+const enableAudio = ref(status.value.enableAudio)
 
 watch(
   () => status.value,
@@ -31,6 +33,7 @@ watch(
     deviceName.value = s.deviceName
     port.value = s.port
     saveDir.value = s.saveDir
+    enableAudio.value = s.enableAudio
   },
   { deep: true },
 )
@@ -57,6 +60,7 @@ function onSave() {
     width: Number(width.value) || 0,
     height: Number(height.value) || 0,
     fps: Number(fps.value) || 0,
+    enableAudio: enableAudio.value,
   })
   emit('update:open', false)
 }
@@ -89,6 +93,16 @@ function onSave() {
         <p class="text-xs text-muted-foreground">
           设置较小的分辨率可显著降低 CPU 占用。
         </p>
+      </div>
+      <Separator />
+      <div class="flex items-start justify-between gap-4">
+        <div class="space-y-1">
+          <Label for="enableAudio">播放设备音频</Label>
+          <p class="text-xs text-muted-foreground">
+            默认关闭。开启后播放手机投屏时的声音；关闭时不接收音频数据。
+          </p>
+        </div>
+        <Switch id="enableAudio" v-model="enableAudio" class="mt-1 shrink-0" />
       </div>
       <Separator />
       <div class="space-y-2">

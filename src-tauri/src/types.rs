@@ -14,8 +14,11 @@ pub struct ReceiverStatus {
     pub connected_device: Option<String>,
     pub demo: bool,
     pub save_dir: String,
-    /// Whether the native protocol+decode DLL was found and can be used.
+    /// Whether the native protocol DLL was found and can be used.
     pub mirror_lib_present: bool,
+    /// Whether the device's audio is played alongside the picture. Off by
+    /// default: mirroring is useful without it and it costs extra traffic.
+    pub enable_audio: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -30,4 +33,6 @@ pub struct StartOptions {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub fps: Option<u32>,
+    /// Play the device's audio too (default off).
+    pub enable_audio: Option<bool>,
 }

@@ -31,11 +31,14 @@ struct MirrorCfg {
 
 type VideoCb = unsafe extern "C" fn(*const u8, i32, i32);
 type StateCb = unsafe extern "C" fn(i32, *const c_char, *const c_char);
-type MirrorStartEx = unsafe extern "C" fn(*const MirrorCfg, VideoCb, StateCb) -> i32;
+type AudioCb = unsafe extern "C" fn(*const u8, i32, i32, i32, i32);
+type MirrorStartAv =
+    unsafe extern "C" fn(*const MirrorCfg, VideoCb, StateCb, Option<AudioCb>) -> i32;
 type MirrorStop = unsafe extern "C" fn();
 
 unsafe extern "C" fn on_video(_data: *const u8, _len: i32, _frame_type: i32) {}
 unsafe extern "C" fn on_state(_event: i32, _name: *const c_char, _id: *const c_char) {}
+unsafe extern "C" fn on_audio(_pcm: *const u8, _len: i32, _rate: i32, _ch: i32, _bits: i32) {}
 
 #[link(name = "kernel32")]
 extern "system" {
@@ -81,8 +84,8 @@ fn loads_starts_and_reports_a_busy_port() {
     let load_time = t0.elapsed();
     assert!(load_time < Duration::from_secs(5), "load took {load_time:?}");
 
-    let start: Symbol<MirrorStartEx> =
-        unsafe { lib.get(b"mirror_start_ex\0") }.expect("missing export mirror_start_ex");
+    let start: Symbol<MirrorStartAv> =
+        unsafe { lib.get(b"mirror_start_av\0") }.expect("missing export mirror_start_av");
     let stop: Symbol<MirrorStop> =
         unsafe { lib.get(b"mirror_stop\0") }.expect("missing export mirror_stop");
 
@@ -99,9 +102,9 @@ fn loads_starts_and_reports_a_busy_port() {
     };
 
     let t0 = Instant::now();
-    let rc = unsafe { start(&cfg as *const MirrorCfg, on_video, on_state) };
+    let rc = unsafe { start(&cfg as *const MirrorCfg, on_video, on_state, Some(on_audio)) };
     let start_time = t0.elapsed();
-    assert_eq!(rc, 0, "mirror_start_ex returned {rc}");
+    assert_eq!(rc, 0, "mirror_start_av returned {rc}");
     // The historical failure was an indefinite hang here, not a slow start.
     assert!(start_time < Duration::from_secs(5), "start took {start_time:?}");
 
@@ -109,7 +112,7 @@ fn loads_starts_and_reports_a_busy_port() {
 
     // Restarting on the same never-unloaded library is how the UI's stop/start
     // works, and the DLL keeps global state across it.
-    let rc = unsafe { start(&cfg as *const MirrorCfg, on_video, on_state) };
+    let rc = unsafe { start(&cfg as *const MirrorCfg, on_video, on_state, Some(on_audio)) };
     assert_eq!(rc, 0, "restart returned {rc}");
     unsafe { stop() };
 
@@ -126,13 +129,13 @@ fn loads_starts_and_reports_a_busy_port() {
         height: 0,
         fps: 0,
     };
-    let rc = unsafe { start(&busy_cfg as *const MirrorCfg, on_video, on_state) };
+    let rc = unsafe { start(&busy_cfg as *const MirrorCfg, on_video, on_state, None) };
     assert_eq!(rc, -4, "a busy port should report -4, got {rc}");
     drop(busy);
 
     // And the receiver still starts normally afterwards: a rejected start must
     // not leave the library wedged.
-    let rc = unsafe { start(&cfg as *const MirrorCfg, on_video, on_state) };
+    let rc = unsafe { start(&cfg as *const MirrorCfg, on_video, on_state, Some(on_audio)) };
     assert_eq!(rc, 0, "start after a rejected start returned {rc}");
     unsafe { stop() };
 

@@ -6,7 +6,7 @@
 #
 # The overlay swaps two things into the upstream tree and changes nothing else:
 #
-#   Bridge.cpp            the C ABI the Rust host calls (mirror_start_ex),
+#   Bridge.cpp            the C ABI the Rust host calls (mirror_start_av),
 #                         including the connect/disconnect state callback
 #   FgAirplayChannel.*    a forwarding channel with no FFmpeg decode path, so
 #                         the H.264 elementary stream reaches the host as-is
@@ -165,7 +165,7 @@ echo "==> built: $OUT/airplay2dll.dll"
 ls -la "$OUT/airplay2dll.dll"
 
 echo "==> exports:"
-objdump -p "$OUT/airplay2dll.dll" | grep -iE "mirror_start_ex|mirror_stop" || {
+objdump -p "$OUT/airplay2dll.dll" | grep -iE "mirror_start_av|mirror_stop" || {
   echo "  ERROR: expected exports missing"; exit 1; }
 
 echo "==> imports:"

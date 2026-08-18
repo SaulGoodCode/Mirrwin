@@ -12,6 +12,7 @@
 - 🖼️ **窗口内渲染**：画面直接绘制在应用内的 `<canvas>`，自动适配竖屏 / 横屏，无独立弹窗
 - 📸 **截图**：一键保存当前画面为 PNG
 - 🎥 **录制**：录制投屏画面为 WebM
+- 🔊 **设备音频**：可在设置中开启，播放手机投屏时的声音（**默认关闭**）
 - 📂 **保存目录**：默认系统「下载」目录，可自选并一键在资源管理器中打开
 - 🔴 **状态指示**：已停止 / 接收中 / 投屏中；断开由协议栈事件精确触发，静止画面不会被误判
 
@@ -35,6 +36,7 @@ iPhone ──AirPlay(mDNS/RTSP/FairPlay/RTP)──▶ airplay2dll.dll
 2. **转发**：Rust 后端（`src-tauri/src/ffi.rs`）把 H.264 分片通过 Tauri `Channel` 高效推送到前端（二进制，无 base64 开销）。
 3. **解码渲染**：前端（`src/lib/h264Decoder.ts`）用 WebView2 内置的 **WebCodecs** 硬件解码 H.264，逐帧 `drawImage` 到画布。
 4. **连接状态**：设备开始/停止投屏时协议库触发状态回调，界面据此精确切换「投屏中 / 接收中」——不依赖任何超时猜测，静止画面不会被误判为断开。
+5. **音频（可选）**：开启后，协议库把已解码的 PCM 经独立通道送到前端，由 `src/lib/pcmPlayer.ts` 用 AudioWorklet 播放；关闭时整条音频路径不启用。
 
 > 这样做的好处：视频作为普通 DOM 画布渲染，天然与界面合成，不存在跨进程窗口嵌入（`SetParent`）的层级/缩放问题，也无需附带 `ffplay.exe` 等外部播放器。解码全部在前端完成，协议库本身不含解码器，因此不依赖 FFmpeg。
 
@@ -94,7 +96,9 @@ airplay-mirror/                    # 项目根目录
 │   │   ├── StatusBar.vue          # 顶部状态栏
 │   │   └── SettingsDialog.vue     # 设置对话框
 │   ├── composables/useReceiver.ts # 状态、事件与帧通道管理
-│   └── lib/h264Decoder.ts         # WebCodecs H.264 (Annex-B) 解码器
+│   └── lib/
+│       ├── h264Decoder.ts         # WebCodecs H.264 (Annex-B) 解码器
+│       └── pcmPlayer.ts           # AudioWorklet PCM 播放（设备音频）
 ├── src-tauri/                    # Rust 后端 (Tauri 2)
 │   ├── src/
 │   │   ├── ffi.rs                 # 加载 DLL、接收 H.264 与连接状态回调并转发

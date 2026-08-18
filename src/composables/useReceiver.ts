@@ -2,6 +2,7 @@ import { ref } from 'vue'
 import { invoke, Channel } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import type { ReceiverStatus, StartOptions } from '@/types'
+import { PcmPlayer } from '@/lib/pcmPlayer'
 
 // Reactive app state shared across components.
 const status = ref<ReceiverStatus>({
@@ -14,6 +15,7 @@ const status = ref<ReceiverStatus>({
   demo: false,
   saveDir: '',
   mirrorLibPresent: false,
+  enableAudio: false,
 })
 const logs = ref<string[]>([])
 // True while a live picture is actually being shown (frames decoding). Distinct
@@ -64,6 +66,10 @@ function toU8(msg: ArrayBuffer | Uint8Array): Uint8Array {
   return msg instanceof Uint8Array ? msg : new Uint8Array(msg)
 }
 
+// Built lazily on the first PCM chunk, which only arrives when the backend was
+// started with audio enabled — so the frontend needs no branch of its own.
+let audioPlayer: PcmPlayer | null = null
+
 export function useReceiver() {
   async function refresh() {
     status.value = await invoke<ReceiverStatus>('get_status')
@@ -88,14 +94,31 @@ export function useReceiver() {
       }
       frameSubscribers.forEach((fn) => fn(bytes))
     }
+
+    // Always opened; the backend only feeds it when audio is switched on.
+    const audioChannel = new Channel<ArrayBuffer>()
+    audioChannel.onmessage = (buf: ArrayBuffer | Uint8Array) => {
+      if (!audioPlayer) {
+        if (!PcmPlayer.isSupported()) {
+          console.error('[audio] this WebView has no AudioWorklet, audio disabled')
+          return
+        }
+        audioPlayer = new PcmPlayer()
+      }
+      audioPlayer.push(toU8(buf))
+    }
+
     status.value = await invoke<ReceiverStatus>('start_mirror', {
       options: opts ?? {},
       frameChannel: channel,
+      audioChannel,
     })
   }
 
   async function stop() {
     mirroring.value = false
+    audioPlayer?.stop()
+    audioPlayer = null
     status.value = await invoke<ReceiverStatus>('stop_mirror')
   }
 

@@ -3,18 +3,19 @@
 //   typedef void (*video_cb)(const uint8_t* data, int len, int frame_type);
 //   typedef void (*state_cb)(int event, const char* remote_name, const char* device_id);
 //
-//   int  mirror_start_ex(const mirror_cfg* cfg, video_cb vcb, state_cb scb);
+//   int  mirror_start_av(const mirror_cfg* cfg, video_cb vcb, state_cb scb, audio_cb acb);
 //   void mirror_stop(void);
 //
 // The host receives the H.264 elementary stream as it arrives and decodes it
-// itself, so nothing here touches FFmpeg and no named pipe is involved.
+// itself, so nothing here touches FFmpeg and no named pipe is involved. Audio
+// is optional: pass a null audio_cb and the PCM path stays idle.
 // `state_cb` surfaces the receiver's connect/disconnect edges, which the
 // protocol stack already tracks: AirPlayServerLib raises them from
 // raop_rtp_start_mirror / raop_rtp_mirror_stop, so a disconnect is reported on
 // both an RTSP TEARDOWN and an abrupt socket close.
 //
-// Both callbacks run on AirPlayServerLib's network threads and must return
-// promptly. `data` is owned by the caller and is freed as soon as video_cb
+// All callbacks run on AirPlayServerLib's network threads and must return
+// promptly. Their buffers are owned by the caller and freed as soon as the call
 // returns — copy anything you need to keep.
 
 #include <winsock2.h>
@@ -39,6 +40,14 @@ typedef void (*video_cb)(const uint8_t* data, int len, int frame_type);
 // event: 0 = connected, 1 = disconnected.
 typedef void (*state_cb)(int event, const char* remote_name, const char* device_id);
 
+// Interleaved PCM, already decoded from AAC by the library's fdk-aac decoder.
+// In practice 16-bit signed little-endian, 480 frames per call, at whatever the
+// stream reports. Pass a null audio_cb to mirror_start_av to leave audio off,
+// which is the default: mirroring is usable without it and users who only want
+// the picture should not pay for the extra traffic.
+typedef void (*audio_cb)(const uint8_t* pcm, int len, int sample_rate, int channels,
+                         int bits_per_sample);
+
 typedef struct mirror_cfg {
     const char* server_name;
     unsigned int raop_port;
@@ -56,7 +65,7 @@ typedef struct mirror_cfg {
 #define BRIDGE_EVENT_CONNECTED    0
 #define BRIDGE_EVENT_DISCONNECTED 1
 
-// Return codes for mirror_start_ex. The host turns these into messages, so a
+// Return codes for mirror_start_av. The host turns these into messages, so a
 // failure that a user can act on gets its own code rather than a generic one.
 #define MIRROR_OK              0
 #define MIRROR_ALREADY_RUNNING 1
@@ -172,6 +181,7 @@ static void blog(const char* fmt, ...) {
 
 static std::atomic<video_cb> g_video_cb{nullptr};
 static std::atomic<state_cb> g_state_cb{nullptr};
+static std::atomic<audio_cb> g_audio_cb{nullptr};
 
 void bridge_on_h264(const unsigned char* data, int len, int is_codec_config) {
     video_cb cb = g_video_cb.load(std::memory_order_acquire);
@@ -189,7 +199,9 @@ static void bridge_on_state(int event, const char* name, const char* id) {
 
 // Adapter implementing IAirServerCallback. Video does not travel through
 // outputVideo: FgAirplayChannel forwards the undecoded stream via
-// bridge_on_h264 instead, which is why this build needs no decoder.
+// bridge_on_h264 instead, which is why this build needs no decoder. Audio does
+// come through outputAudio, already decoded to PCM by the library's AAC
+// decoder, so it needs no special routing.
 class BridgeCallback : public IAirServerCallback {
 public:
     void connected(const char* remoteName, const char* remoteDeviceId) override {
@@ -202,7 +214,13 @@ public:
              remoteDeviceId ? remoteDeviceId : "(null)");
         bridge_on_state(BRIDGE_EVENT_DISCONNECTED, remoteName, remoteDeviceId);
     }
-    void outputAudio(SFgAudioFrame*, const char*, const char*) override {}
+    void outputAudio(SFgAudioFrame* f, const char*, const char*) override {
+        audio_cb cb = g_audio_cb.load(std::memory_order_acquire);
+        if (cb && f && f->data && f->dataLen > 0) {
+            cb(f->data, (int)f->dataLen, (int)f->sampleRate, (int)f->channels,
+               (int)f->bitsPerSample);
+        }
+    }
     void outputVideo(SFgVideoFrame*, const char*, const char*) override {}
     void videoPlay(char*, double, double) override {}
     void videoGetPlayInfo(double*, double*, double*) override {}
@@ -217,13 +235,19 @@ static void* g_handle = nullptr;
 extern "C" {
 
 // Start the receiver. Returns 0 on success, 1 if already running, <0 on error.
-AIRPLAYSERVER_API int mirror_start_ex(const mirror_cfg* cfg, video_cb vcb, state_cb scb) {
+// A null `acb` leaves audio off — the receiver then never touches the PCM path.
+//
+// The name changes whenever the signature does (this was mirror_start_ex before
+// audio). A stale DLL and a fresh host then fail loudly at symbol lookup, rather
+// than the host quietly pushing an extra argument the DLL reads as garbage.
+AIRPLAYSERVER_API int mirror_start_av(const mirror_cfg* cfg, video_cb vcb, state_cb scb,
+                                      audio_cb acb) {
     if (!cfg) {
-        blog("mirror_start_ex: null cfg");
+        blog("mirror_start_av: null cfg");
         return MIRROR_ERR_ARGS;
     }
     if (g_handle) {
-        blog("mirror_start_ex: already running");
+        blog("mirror_start_av: already running");
         return MIRROR_ALREADY_RUNNING;
     }
 
@@ -233,35 +257,38 @@ AIRPLAYSERVER_API int mirror_start_ex(const mirror_cfg* cfg, video_cb vcb, state
         airplay_port = 7000;
         raop_port = 6999;
     }
-    blog("mirror_start_ex: name=%s raop=%u airplay=%u",
+    blog("mirror_start_av: name=%s raop=%u airplay=%u",
          cfg->server_name ? cfg->server_name : "(null)", raop_port, airplay_port);
 
     if (!bonjour_available()) {
-        blog("mirror_start_ex: dnssd.dll (Bonjour) missing or incomplete");
+        blog("mirror_start_av: dnssd.dll (Bonjour) missing or incomplete");
         return MIRROR_ERR_NO_BONJOUR;
     }
     if (!port_free((unsigned short)airplay_port) || !port_free((unsigned short)raop_port)) {
-        blog("mirror_start_ex: port %u or %u already in use", airplay_port, raop_port);
+        blog("mirror_start_av: port %u or %u already in use", airplay_port, raop_port);
         return MIRROR_ERR_PORT_BUSY;
     }
 
     // Publish the callbacks before the server can raise anything.
     g_video_cb.store(vcb, std::memory_order_release);
     g_state_cb.store(scb, std::memory_order_release);
+    g_audio_cb.store(acb, std::memory_order_release);
+    blog("mirror_start_av: audio %s", acb ? "enabled" : "disabled");
 
     g_cb = new BridgeCallback();
     g_handle = fgServerStart(cfg->server_name, raop_port, airplay_port, g_cb, cfg->password);
     if (!g_handle) {
         // Reached when the stack itself failed — Bonjour present but its
         // service not running, a socket refused by policy, and so on.
-        blog("mirror_start_ex: fgServerStart failed");
+        blog("mirror_start_av: fgServerStart failed");
         g_video_cb.store(nullptr, std::memory_order_release);
         g_state_cb.store(nullptr, std::memory_order_release);
+        g_audio_cb.store(nullptr, std::memory_order_release);
         delete g_cb;
         g_cb = nullptr;
         return MIRROR_ERR_START;
     }
-    blog("mirror_start_ex: started");
+    blog("mirror_start_av: started");
     return MIRROR_OK;
 }
 
@@ -271,6 +298,7 @@ AIRPLAYSERVER_API void mirror_stop(void) {
     // whatever the callbacks write into.
     g_video_cb.store(nullptr, std::memory_order_release);
     g_state_cb.store(nullptr, std::memory_order_release);
+    g_audio_cb.store(nullptr, std::memory_order_release);
 
     if (g_handle) {
         fgServerStop(g_handle);

@@ -2,7 +2,7 @@
 //
 // Loads the DLL by absolute path, starts the receiver, lets it advertise for a
 // few seconds, then stops it. Checks three things that have bitten this project
-// before: that the DLL loads at all, that mirror_start_ex returns promptly
+// before: that the DLL loads at all, that mirror_start_av returns promptly
 // instead of hanging, and that both survive a load path containing a space.
 //
 //   gcc -O2 -o smoke_test.exe smoke_test.c
@@ -25,18 +25,32 @@ typedef struct mirror_cfg {
 
 typedef void (*video_cb)(const unsigned char* data, int len, int frame_type);
 typedef void (*state_cb)(int event, const char* remote_name, const char* device_id);
-typedef int  (*mirror_start_ex_t)(const mirror_cfg*, video_cb, state_cb);
+typedef void (*audio_cb)(const unsigned char* pcm, int len, int sample_rate, int channels,
+                         int bits_per_sample);
+typedef int  (*mirror_start_av_t)(const mirror_cfg*, video_cb, state_cb, audio_cb);
 typedef void (*mirror_stop_t)(void);
 
 static volatile LONG g_video_calls = 0;
 static volatile LONG g_video_bytes = 0;
 static volatile LONG g_state_calls = 0;
+static volatile LONG g_audio_calls = 0;
 
 static void on_video(const unsigned char* data, int len, int frame_type) {
     InterlockedIncrement(&g_video_calls);
     InterlockedExchangeAdd(&g_video_bytes, len);
     if (g_video_calls <= 3) {
         printf("  [video] #%ld frame_type=%d len=%d\n", g_video_calls, frame_type, len);
+        fflush(stdout);
+    }
+}
+
+static void on_audio(const unsigned char* pcm, int len, int sample_rate, int channels,
+                     int bits_per_sample) {
+    (void)pcm;
+    InterlockedIncrement(&g_audio_calls);
+    if (g_audio_calls <= 3) {
+        printf("  [audio] #%ld %d bytes %dHz %dch %dbit\n",
+               g_audio_calls, len, sample_rate, channels, bits_per_sample);
         fflush(stdout);
     }
 }
@@ -74,7 +88,7 @@ int main(int argc, char** argv) {
     }
     printf("PASS: loaded in %lu ms\n", ms);
 
-    mirror_start_ex_t start = (mirror_start_ex_t)GetProcAddress(h, "mirror_start_ex");
+    mirror_start_av_t start = (mirror_start_av_t)GetProcAddress(h, "mirror_start_av");
     mirror_stop_t stop = (mirror_stop_t)GetProcAddress(h, "mirror_stop");
     if (!start || !stop) {
         printf("FAIL: missing exports (start=%p stop=%p)\n", (void*)start, (void*)stop);
@@ -97,9 +111,9 @@ int main(int argc, char** argv) {
         printf("\n--- cycle %d ---\n", cycle);
 
         t0 = GetTickCount();
-        int rc = start(&cfg, on_video, on_state);
+        int rc = start(&cfg, on_video, on_state, on_audio);
         ms = GetTickCount() - t0;
-        printf("mirror_start_ex -> rc=%d in %lu ms\n", rc, ms);
+        printf("mirror_start_av -> rc=%d in %lu ms\n", rc, ms);
         if (rc != 0) {
             printf("FAIL: start returned %d\n", rc);
             return 1;
@@ -121,8 +135,8 @@ int main(int argc, char** argv) {
         printf("PASS: stopped cleanly\n");
     }
 
-    printf("\ncallbacks: video=%ld (%ld bytes) state=%ld\n",
-           g_video_calls, g_video_bytes, g_state_calls);
+    printf("\ncallbacks: video=%ld (%ld bytes) state=%ld audio=%ld\n",
+           g_video_calls, g_video_bytes, g_state_calls, g_audio_calls);
     printf("PASS: survived start/stop/start/stop\n");
     return 0;
 }
