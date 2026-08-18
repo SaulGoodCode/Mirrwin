@@ -113,6 +113,8 @@ pub async fn start_mirror(
 
     // The DLL delivers H.264 and connect/disconnect edges through callbacks, so
     // starting the receiver is all there is to do — no reader thread to spawn.
+    // Its errors are already written for the user, so they pass through as-is
+    // rather than collecting another prefix on the way to the toast.
     ffi::start_mirror(
         &dll_path,
         &name,
@@ -122,8 +124,7 @@ pub async fn start_mirror(
         fps,
         frame_channel,
         app.clone(),
-    )
-    .map_err(|e| format!("启动原生协议库失败：{e}"))?;
+    )?;
 
     *state.running.lock().unwrap() = true;
 

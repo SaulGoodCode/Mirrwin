@@ -17,10 +17,12 @@
 // promptly. `data` is owned by the caller and is freed as soon as video_cb
 // returns — copy anything you need to keep.
 
+#include <winsock2.h>
+#include <windows.h>
+
 #include "Airplay2Head.h"
 #include "BridgeTap.h"
 
-#include <windows.h>
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
@@ -53,6 +55,83 @@ typedef struct mirror_cfg {
 
 #define BRIDGE_EVENT_CONNECTED    0
 #define BRIDGE_EVENT_DISCONNECTED 1
+
+// Return codes for mirror_start_ex. The host turns these into messages, so a
+// failure that a user can act on gets its own code rather than a generic one.
+#define MIRROR_OK              0
+#define MIRROR_ALREADY_RUNNING 1
+#define MIRROR_ERR_ARGS        (-1)
+#define MIRROR_ERR_START       (-2)
+#define MIRROR_ERR_NO_BONJOUR  (-3)
+#define MIRROR_ERR_PORT_BUSY   (-4)
+
+// ── preflight ────────────────────────────────────────────────────────────
+// Upstream reports every startup failure the same way: not at all. Its
+// FgAirplayServer::start() returned 0 unconditionally and the export ignored
+// the result, so a receiver that never came up still looked started. The build
+// script patches those two spots, but a bare error code cannot tell a user what
+// to do — so the two failures that are actually actionable are detected here
+// and named.
+
+/// Whether Apple's Bonjour is usable. AirPlayServerLib's `dnssd_init()`
+/// LoadLibrary's `dnssd.dll` and resolves exactly these symbols; without them
+/// there is no mDNS advertisement and the phone never discovers this machine.
+/// Bonjour is not bundled with the app — it arrives with iTunes — so on a clean
+/// Windows install this is the first thing that fails.
+static bool bonjour_available(void) {
+    HMODULE m = LoadLibraryA("dnssd.dll");
+    if (!m) {
+        return false;
+    }
+    static const char* const kRequired[] = {
+        "DNSServiceRegister", "DNSServiceRefDeallocate", "TXTRecordCreate",
+        "TXTRecordSetValue", "TXTRecordGetLength", "TXTRecordGetBytesPtr",
+        "TXTRecordDeallocate",
+    };
+    bool ok = true;
+    for (size_t i = 0; i < sizeof(kRequired) / sizeof(kRequired[0]); i++) {
+        if (!GetProcAddress(m, kRequired[i])) {
+            ok = false;
+            break;
+        }
+    }
+    // dnssd_init takes its own reference moments later; drop ours.
+    FreeLibrary(m);
+    return ok;
+}
+
+/// Whether a TCP port can still be bound. `raop_start`/`airplay_start` bind the
+/// exact port they are given and fail outright if it is taken — commonly by a
+/// second copy of this app or another AirPlay receiver.
+static bool port_free(unsigned short port) {
+    static std::once_flag ws_once;
+    static bool ws_ready = false;
+    std::call_once(ws_once, []() {
+        WSADATA data;
+        // Deliberately never paired with WSACleanup: the reference is held for
+        // the process, so nothing here can tear Winsock out from under the
+        // protocol stack.
+        ws_ready = (WSAStartup(MAKEWORD(2, 2), &data) == 0);
+    });
+    if (!ws_ready) {
+        return true;  // cannot tell; let the stack try
+    }
+
+    SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (s == INVALID_SOCKET) {
+        return true;
+    }
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons(port);
+    // No SO_REUSEADDR on purpose: on Windows it would let this bind land next
+    // to an existing listener and hide the very conflict being probed for.
+    bool ok = (bind(s, (struct sockaddr*)&addr, sizeof(addr)) == 0);
+    closesocket(s);
+    return ok;
+}
 
 // ── opt-in diagnostics ───────────────────────────────────────────────────
 // Off unless AIRPLAY_BRIDGE_LOG names a file. Lifecycle events only: an
@@ -141,11 +220,11 @@ extern "C" {
 AIRPLAYSERVER_API int mirror_start_ex(const mirror_cfg* cfg, video_cb vcb, state_cb scb) {
     if (!cfg) {
         blog("mirror_start_ex: null cfg");
-        return -1;
+        return MIRROR_ERR_ARGS;
     }
     if (g_handle) {
         blog("mirror_start_ex: already running");
-        return 1;
+        return MIRROR_ALREADY_RUNNING;
     }
 
     unsigned int raop_port = cfg->raop_port;
@@ -157,6 +236,15 @@ AIRPLAYSERVER_API int mirror_start_ex(const mirror_cfg* cfg, video_cb vcb, state
     blog("mirror_start_ex: name=%s raop=%u airplay=%u",
          cfg->server_name ? cfg->server_name : "(null)", raop_port, airplay_port);
 
+    if (!bonjour_available()) {
+        blog("mirror_start_ex: dnssd.dll (Bonjour) missing or incomplete");
+        return MIRROR_ERR_NO_BONJOUR;
+    }
+    if (!port_free((unsigned short)airplay_port) || !port_free((unsigned short)raop_port)) {
+        blog("mirror_start_ex: port %u or %u already in use", airplay_port, raop_port);
+        return MIRROR_ERR_PORT_BUSY;
+    }
+
     // Publish the callbacks before the server can raise anything.
     g_video_cb.store(vcb, std::memory_order_release);
     g_state_cb.store(scb, std::memory_order_release);
@@ -164,15 +252,17 @@ AIRPLAYSERVER_API int mirror_start_ex(const mirror_cfg* cfg, video_cb vcb, state
     g_cb = new BridgeCallback();
     g_handle = fgServerStart(cfg->server_name, raop_port, airplay_port, g_cb, cfg->password);
     if (!g_handle) {
-        blog("mirror_start_ex: fgServerStart returned NULL");
+        // Reached when the stack itself failed — Bonjour present but its
+        // service not running, a socket refused by policy, and so on.
+        blog("mirror_start_ex: fgServerStart failed");
         g_video_cb.store(nullptr, std::memory_order_release);
         g_state_cb.store(nullptr, std::memory_order_release);
         delete g_cb;
         g_cb = nullptr;
-        return -2;
+        return MIRROR_ERR_START;
     }
     blog("mirror_start_ex: started");
-    return 0;
+    return MIRROR_OK;
 }
 
 AIRPLAYSERVER_API void mirror_stop(void) {

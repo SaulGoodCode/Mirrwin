@@ -1,12 +1,13 @@
-//! Loads the bundled protocol DLL from a path containing a space and drives one
-//! start/stop cycle.
+//! Drives the bundled protocol DLL through its ABI: loading from a path
+//! containing a space, starting, stopping, restarting, and refusing a taken
+//! port.
 //!
-//! This guards a bug that was expensive to find: the app used to hang forever
-//! at `mirror_start` when installed to the default `...\AirPlay Mirror\...`
-//! directory, and release builds have no console to report it. The cause was
-//! the bundled FFmpeg DLLs, which were Cygwin builds pulling in `msys-2.0.dll`
-//! and its path mangling. Those are gone and `ffi.rs` no longer carries a
-//! short-path workaround, so this test is what keeps the regression visible.
+//! This guards two bugs that were expensive to find. The app used to hang
+//! forever at start when installed to the default `...\AirPlay Mirror\...`
+//! directory — the bundled FFmpeg DLLs were Cygwin builds whose `msys-2.0.dll`
+//! path mangling deadlocked there — and release builds have no console to
+//! report it. And a failed startup used to be indistinguishable from a good
+//! one, so a taken port left the UI claiming to receive while nothing listened.
 //!
 //! No phone is required: without one, the receiver simply advertises and stops.
 
@@ -48,7 +49,7 @@ fn set_dll_dir(dir: &std::path::Path) {
 }
 
 #[test]
-fn loads_and_starts_from_a_path_containing_a_space() {
+fn loads_starts_and_reports_a_busy_port() {
     let resources = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("resources")
         .join("airplay");
@@ -110,6 +111,29 @@ fn loads_and_starts_from_a_path_containing_a_space() {
     // works, and the DLL keeps global state across it.
     let rc = unsafe { start(&cfg as *const MirrorCfg, on_video, on_state) };
     assert_eq!(rc, 0, "restart returned {rc}");
+    unsafe { stop() };
+
+    // A taken port must be reported, not swallowed. Upstream binds the exact
+    // port it is given and fails, but used to return success anyway, leaving
+    // the UI claiming to receive while nothing listened.
+    let busy = std::net::TcpListener::bind(("0.0.0.0", 7041)).expect("occupy a port");
+    let busy_cfg = MirrorCfg {
+        server_name: name.as_ptr(),
+        raop_port: 7040,
+        airplay_port: 7041,
+        password: std::ptr::null(),
+        width: 0,
+        height: 0,
+        fps: 0,
+    };
+    let rc = unsafe { start(&busy_cfg as *const MirrorCfg, on_video, on_state) };
+    assert_eq!(rc, -4, "a busy port should report -4, got {rc}");
+    drop(busy);
+
+    // And the receiver still starts normally afterwards: a rejected start must
+    // not leave the library wedged.
+    let rc = unsafe { start(&cfg as *const MirrorCfg, on_video, on_state) };
+    assert_eq!(rc, 0, "start after a rejected start returned {rc}");
     unsafe { stop() };
 
     let _ = std::fs::remove_dir_all(&staged);

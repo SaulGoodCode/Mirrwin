@@ -62,6 +62,27 @@ find "$REPO" -type f \( -name '*.c' -o -name '*.h' -o -name '*.cpp' -o -name '*.
     iconv -f UTF-16 -t UTF-8 "$f" > "$f.tmp" && mv "$f.tmp" "$f"
   fi
 done
+# 4) upstream swallows its own startup failure: FgAirplayServer::start() returns
+#    0 unconditionally and fgServerStartWithDisplay ignores the result, so a
+#    receiver that never came up (port taken, Bonjour service down) still looked
+#    started to the host. Make the failure reach the caller. Each edit is
+#    verified below and the build fails if an anchor ever stops matching.
+SRV="$REPO/airplay2dll/src/FgAirplayServer.cpp"
+EXP="$REPO/airplay2dll/src/Airplay2Export.cpp"
+if ! grep -q 'overlay: propagate startup failure' "$SRV"; then
+  sed -i 's|^\t\tstop();$|\t\tstop();\n\t\treturn ret;  // overlay: propagate startup failure|' "$SRV"
+fi
+if ! grep -q 'overlay: do not hand back a dead server' "$EXP"; then
+  sed -i 's|^\tpServer->start(serverName, raopPort, airplayPort, callback, password,$|\tint rc = pServer->start(serverName, raopPort, airplayPort, callback, password,|' "$EXP"
+  sed -i 's|^\treturn pServer;$|\tif (rc != 0) {  // overlay: do not hand back a dead server\n\t\tdelete pServer;\n\t\treturn NULL;\n\t}\n\treturn pServer;|' "$EXP"
+fi
+grep -q 'overlay: propagate startup failure' "$SRV" || {
+  echo "  ERROR: could not patch FgAirplayServer::start (upstream changed?)"; exit 1; }
+grep -q 'overlay: do not hand back a dead server' "$EXP" || {
+  echo "  ERROR: could not patch fgServerStartWithDisplay (upstream changed?)"; exit 1; }
+grep -q 'int rc = pServer->start' "$EXP" || {
+  echo "  ERROR: fgServerStartWithDisplay patch is half-applied"; exit 1; }
+echo "==> upstream startup-failure patches applied"
 
 # Deliberately no -I external/ffmpeg/include: a stray libav* include should
 # fail the build rather than quietly restore the dependency we just removed.

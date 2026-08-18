@@ -124,6 +124,30 @@ type MirrorStop = unsafe extern "C" fn();
 const EVENT_CONNECTED: i32 = 0;
 const EVENT_DISCONNECTED: i32 = 1;
 
+/// Turn a `mirror_start_ex` return code into something the user can act on.
+/// The codes are defined in `tools/airplay-dll/Bridge.cpp`; the two that a user
+/// can actually do something about are detected there specifically so they do
+/// not arrive here as a generic failure.
+fn describe_start_error(rc: i32, port: u16) -> String {
+    match rc {
+        1 => "协议库报告接收器已在运行。请先停止再重新开始。".to_string(),
+        -1 => "内部错误：启动参数无效。".to_string(),
+        -2 => "AirPlay 协议栈启动失败。请确认 Bonjour 服务正在运行，\
+               并且防火墙允许本程序访问网络。"
+            .to_string(),
+        -3 => "未检测到 Bonjour（dnssd.dll）。iPhone 依靠 mDNS 发现本机，\
+               缺少它就搜索不到本设备。请安装 Apple Bonjour（随 iTunes 提供）后重试。"
+            .to_string(),
+        -4 => format!(
+            "端口 {} 或 {} 已被占用，可能已有另一个本程序或 AirPlay 接收端在运行。\
+             请关闭它，或在设置中改用其他端口。",
+            port,
+            port.saturating_sub(1)
+        ),
+        other => format!("协议库返回未知错误码 {other}。"),
+    }
+}
+
 // ── callback sink ────────────────────────────────────────────────────────
 
 /// Where the DLL's callbacks deliver to. The C ABI carries no userdata, so the
@@ -297,7 +321,7 @@ pub fn start_mirror(
     eprintln!("[ffi] mirror_start_ex returned rc={rc}");
     if rc != 0 {
         clear_sink();
-        return Err(format!("mirror_start_ex 返回错误码 {rc}"));
+        return Err(describe_start_error(rc, port));
     }
 
     *SERVER_NAME.lock().unwrap() = Some(c_name);

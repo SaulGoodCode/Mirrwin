@@ -32,12 +32,29 @@ typedef struct {
     int width, height, fps;     // 保留字段，当前忽略（始终用设备原生流）
 } mirror_cfg;
 
-int  mirror_start_ex(const mirror_cfg* cfg, video_cb vcb, state_cb scb);  // 0 = 成功，1 = 已在运行
+int  mirror_start_ex(const mirror_cfg* cfg, video_cb vcb, state_cb scb);
 void mirror_stop(void);
 ```
 
 `ffi.rs` 里的 `#[repr(C)] MirrorCfg` 必须与上面**逐字节一致**（64 位下指针 8 字节、
 int/unsigned 4 字节）。
+
+### `mirror_start_ex` 返回码
+
+| 码 | 含义 | `ffi.rs` 给用户的提示 |
+| --- | --- | --- |
+| `0` | 成功 | — |
+| `1` | 已在运行 | 先停止再重新开始 |
+| `-1` | 参数无效 | 内部错误 |
+| `-2` | 协议栈启动失败 | 检查 Bonjour 服务与防火墙 |
+| `-3` | 缺少 Bonjour（`dnssd.dll`） | 提示安装 Apple Bonjour |
+| `-4` | 端口被占用 | 提示关闭占用者或换端口 |
+
+`-3` 和 `-4` 由 `Bridge.cpp` 在调用协议栈**之前**主动探测得出 —— 这两种失败用户能自己解决，
+值得给出具体提示，而不是笼统的"启动失败"。
+
+> **Bonjour 是硬依赖**：`dnssd_init()` 会 `LoadLibrary("dnssd.dll")` 并解析 7 个符号，
+> 没有它就没有 mDNS 广播，iPhone 永远发现不了本机。它**不随本程序分发**（通常随 iTunes 安装）。
 
 ### 回调约定
 
@@ -68,15 +85,18 @@ iPhone 停止投屏时，协议栈会走到 `raop_rtp_mirror_stop()`，它对**�
 tools/build-airplay-dll.sh [上游仓库路径]   # 默认 E:/tmp/xenos/AirPlayServer-research，不存在会自动 clone
 ```
 
-需要 MSYS2 mingw64（`C:\msys64`）。脚本把 `tools/airplay-dll/` 的覆盖层拷进上游树后构建，
-**不修改上游源码**（除两处历来必需的编译兼容 sed 补丁）。覆盖层只有两块：
+需要 MSYS2 mingw64（`C:\msys64`）。脚本把 `tools/airplay-dll/` 的覆盖层拷进上游树后构建。
+覆盖层是两个替换文件：
 
 | 文件 | 作用 |
 | --- | --- |
-| `Bridge.cpp` | 上面这套 C ABI，含连接/断开状态回调 |
+| `Bridge.cpp` | 上面这套 C ABI，含连接/断开状态回调与启动前置检查 |
 | `FgAirplayChannel.{h,cpp}` | 去掉 FFmpeg 解码的转发版通道，H.264 原样交给宿主 |
 
-构建脚本末尾会自检导出符号，并在 FFmpeg/MSYS 依赖被重新引入时报错退出。
+另外对上游打 4 处 sed 补丁：2 处历来必需的编译兼容修正，2 处让启动失败能传出来
+（上游 `FgAirplayServer::start()` 无条件 `return 0`，`fgServerStartWithDisplay` 又不看返回值，
+于是启动失败的接收器在宿主看来完全正常）。**每处补丁构建时都会校验，锚点失配就直接报错退出**，
+不会静默漏打。构建脚本末尾还会自检导出符号，并在 FFmpeg/MSYS 依赖被重新引入时报错。
 
 冒烟测试（不需要手机）：
 

@@ -44,7 +44,9 @@ iPhone ──AirPlay(mDNS/RTSP/FairPlay/RTP)──▶ airplay2dll.dll
 
 - **Windows 10 / 11 (x64)**
 - **WebView2 运行时**：较新版本（内置 Chromium，需支持 WebCodecs；现代 Windows 一般已预装，Edge 更新即会更新）
+- **Apple Bonjour**：iPhone 通过 mDNS 发现本机，**没有它就搜索不到本设备**。它不随本程序分发，装过 iTunes 的机器通常已有（`C:\Windows\System32\dnssd.dll` + 「Bonjour Service」服务）。缺失时点「开始接收」会明确报错提示安装。
 - **原生依赖**：`src-tauri/resources/airplay/` 下的 2 个 DLL（详见下方说明），仓库已包含
+- **防火墙**：首次启动接收器时 Windows 会询问是否允许网络访问，需要选「允许」（否则 iPhone 连不上）
 - iPhone / iPad 与电脑处于**同一局域网**
 
 ---
