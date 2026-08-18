@@ -44,7 +44,7 @@ iPhone ──AirPlay(mDNS/RTSP/FairPlay/RTP)──▶ airplay2dll.dll
 
 - **Windows 10 / 11 (x64)**
 - **WebView2 运行时**：较新版本（内置 Chromium，需支持 WebCodecs；现代 Windows 一般已预装，Edge 更新即会更新）
-- **Apple Bonjour**：iPhone 通过 mDNS 发现本机，**没有它就搜索不到本设备**。它不随本程序分发，装过 iTunes 的机器通常已有（`C:\Windows\System32\dnssd.dll` + 「Bonjour Service」服务）。缺失时点「开始接收」会明确报错提示安装。
+- **Apple Bonjour**：iPhone 通过 mDNS 发现本机，**没有它就搜索不到本设备**。它不随程序运行时分发，但**安装程序会自动检测**：缺失时询问并一键安装（附带 Apple 官方 MSI，详见 `src-tauri/installer/README.md`）。装过 iTunes 的机器通常已有。
 - **原生依赖**：`src-tauri/resources/airplay/` 下的 2 个 DLL（详见下方说明），仓库已包含
 - **防火墙**：首次启动接收器时 Windows 会询问是否允许网络访问，需要选「允许」（否则 iPhone 连不上）
 - iPhone / iPad 与电脑处于**同一局域网**
@@ -101,6 +101,8 @@ airplay-mirror/                    # 项目根目录
 │   │   ├── commands.rs            # Tauri 命令：开始/停止、截图、录制、打开目录
 │   │   ├── state.rs               # 应用共享状态
 │   │   └── lib.rs                 # 入口与命令注册
+│   ├── installer/                 # NSIS 安装钩子 + 附带的 Bonjour MSI
+│   ├── tests/dll_load.rs          # 协议库加载/启动/端口冲突回归测试
 │   └── resources/airplay/         # airplay2dll.dll 及其运行时依赖 DLL
 ├── tools/
 │   ├── build-airplay-dll.sh       # 从上游 + 覆盖层重建协议库
@@ -126,4 +128,5 @@ airplay-mirror/                    # 项目根目录
 ## 🙏 致谢与许可
 
 - AirPlay 协议库：[xenos1337/AirPlayServer](https://github.com/xenos1337/AirPlayServer)（MIT）
+- 安装程序附带的 **Apple Bonjour** 为 Apple Inc. 的软件，本项目不拥有其版权；对外分发前请确认符合 Apple 的再分发条款，详见 `src-tauri/installer/README.md`。
 - 本项目自身建议根据需要补充 `LICENSE` 文件。
