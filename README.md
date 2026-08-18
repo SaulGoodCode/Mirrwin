@@ -44,7 +44,7 @@ iPhone ──AirPlay(mDNS/RTSP/FairPlay/RTP)──▶ airplay2dll.dll
 
 - **Windows 10 / 11 (x64)**
 - **WebView2 运行时**：较新版本（内置 Chromium，需支持 WebCodecs；现代 Windows 一般已预装，Edge 更新即会更新）
-- **原生依赖**：`src-tauri/resources/ffmpeg/` 下的 2 个 DLL（详见下方说明），仓库已包含
+- **原生依赖**：`src-tauri/resources/airplay/` 下的 2 个 DLL（详见下方说明），仓库已包含
 - iPhone / iPad 与电脑处于**同一局域网**
 
 ---
@@ -99,7 +99,7 @@ airplay-mirror/                    # 项目根目录
 │   │   ├── commands.rs            # Tauri 命令：开始/停止、截图、录制、打开目录
 │   │   ├── state.rs               # 应用共享状态
 │   │   └── lib.rs                 # 入口与命令注册
-│   └── resources/ffmpeg/          # airplay2dll.dll 及其运行时依赖 DLL
+│   └── resources/airplay/         # airplay2dll.dll 及其运行时依赖 DLL
 ├── tools/
 │   ├── build-airplay-dll.sh       # 从上游 + 覆盖层重建协议库
 │   └── airplay-dll/               # 覆盖层源码（Bridge.cpp / 通道 / 冒烟测试）
@@ -110,13 +110,12 @@ airplay-mirror/                    # 项目根目录
 
 ## ⚠️ 说明与限制
 
-- **`resources/ffmpeg/` 下的 2 个 DLL 均为必需**，缺一不可（否则协议库无法加载）：
+- **`resources/airplay/` 下的 2 个 DLL 均为必需**，缺一不可（否则协议库无法加载）：
   | DLL | 作用 |
   | --- | --- |
   | `airplay2dll.dll` | AirPlay 协议库（本程序直接加载） |
   | `libwinpthread-1.dll` | `airplay2dll.dll` 的线程运行时依赖 |
 
-  > 目录名 `ffmpeg` 是历史遗留：协议库早期在内部用 FFmpeg 解码，现在解码全部由前端 WebCodecs 完成，随包的 FFmpeg 动态库已移除。
 - 协议库随仓库提供，也可用 `tools/build-airplay-dll.sh` 自行重建（需要 MSYS2 mingw64）；ABI 与覆盖层说明见 `docs/ffi-contract.md`。
 - AirPlay / FairPlay 为 Apple 私有协议，本项目仅供**学习与个人使用**。
 

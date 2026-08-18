@@ -1,10 +1,9 @@
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use tauri::ipc::Channel;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, State};
 
 use crate::ffi;
 use crate::state::AppState;
@@ -54,15 +53,6 @@ pub fn emit_status(app: &AppHandle, state: &Arc<AppState>) {
     let _ = app.emit("status", read_status(state));
 }
 
-/// Resolve the bundled `resources/ffmpeg` directory where the native library
-/// and its FFmpeg DLLs live.
-fn ffmpeg_resources_dir(app: &AppHandle) -> Option<PathBuf> {
-    app.path()
-        .resource_dir()
-        .ok()
-        .map(|d| d.join("resources").join("ffmpeg"))
-}
-
 #[tauri::command]
 pub async fn start_mirror(
     options: StartOptions,
@@ -104,10 +94,8 @@ pub async fn start_mirror(
     // and hands back the H.264 elementary stream, which we forward to the
     // webview over a binary `Channel` for WebCodecs to decode.
     *state.mode.lock().unwrap() = "real".to_string();
-    let res_dir = ffmpeg_resources_dir(&app)
-        .ok_or_else(|| "无法定位 resources 目录（打包异常）".to_string())?;
-    let dll_path = ffi::locate_dll(&res_dir).ok_or_else(|| {
-        "未找到协议库 DLL。请将 airplay2dll.dll 放入 resources/ffmpeg 目录 \
+    let dll_path = ffi::locate_dll(&app).ok_or_else(|| {
+        "未找到协议库 DLL。请将 airplay2dll.dll 放入 resources/airplay 目录 \
          （见 README 与 docs/ffi-contract.md）。"
             .to_string()
     })?;

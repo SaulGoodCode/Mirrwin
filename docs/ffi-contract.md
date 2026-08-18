@@ -1,6 +1,6 @@
 # 原生协议库集成说明（airplay2dll.dll）
 
-本项目通过 FFI 加载原生 C/C++ 协议库 `src-tauri/resources/ffmpeg/airplay2dll.dll`，它基于
+本项目通过 FFI 加载原生 C/C++ 协议库 `src-tauri/resources/airplay/airplay2dll.dll`，它基于
 [xenos1337/AirPlayServer](https://github.com/xenos1337/AirPlayServer) 加上本仓库
 `tools/airplay-dll/` 里的覆盖层构建。该库负责完整的 AirPlay 协议栈（mDNS 广播、RTSP、
 FairPlay 配对/解密、RTP），并把解密后的 **H.264 Annex-B 裸流**通过回调直接交给宿主。
@@ -59,7 +59,8 @@ iPhone 停止投屏时，协议栈会走到 `raop_rtp_mirror_stop()`，它对**�
   用 `OnceLock` 只加载一次，靠 `mirror_start_ex`/`mirror_stop` 复用，实现停止/重开。
 - **加载路径含空格**：旧版本在带空格的目录下会卡死（`mirror_start` 永不返回），根因是随包的
   FFmpeg DLL 是 Cygwin 构建、会拉起 `msys-2.0.dll` 做路径转换。当前 DLL 已不依赖它们，实测
-  带空格路径 15ms 加载完成。`resolve_space_free_dll` 作为廉价保险保留（无空格路径下是空操作）。
+  带空格路径 15ms 加载完成，因此原先的 `resolve_space_free_dll`（8.3 短路径 / 复制到无空格
+  暂存目录）已删除。若将来重新引入任何 Cygwin/MSYS 构建的依赖，这个坑会回来。
 
 ## 重新编译 DLL
 

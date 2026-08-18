@@ -17,20 +17,13 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(state)
         .setup(|app| {
-            // Probe for the native protocol + decode DLL so the frontend can
-            // show whether real mirroring is available before the user starts.
-            if let Some(res) = app
-                .path()
-                .resource_dir()
-                .ok()
-                .map(|d| d.join("resources").join("ffmpeg"))
-            {
-                let present = crate::ffi::locate_dll(&res).is_some();
-                *app.state::<Arc<AppState>>()
-                    .mirror_lib_present
-                    .lock()
-                    .unwrap() = present;
-            }
+            // Probe for the native protocol DLL so the frontend can show
+            // whether real mirroring is available before the user starts.
+            let present = crate::ffi::locate_dll(app.handle()).is_some();
+            *app.state::<Arc<AppState>>()
+                .mirror_lib_present
+                .lock()
+                .unwrap() = present;
             // Default the screenshot/recording directory to the system Downloads
             // folder (only if the user hasn't already chosen one).
             if let Ok(downloads) = app.path().download_dir() {

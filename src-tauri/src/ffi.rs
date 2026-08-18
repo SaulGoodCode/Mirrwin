@@ -49,7 +49,6 @@ use crate::state::AppState;
 #[link(name = "kernel32")]
 extern "system" {
     fn SetDllDirectoryW(lpPathName: *const u16) -> i32;
-    fn GetShortPathNameW(long: *const u16, short: *mut u16, cch: u32) -> u32;
 }
 
 #[cfg(windows)]
@@ -67,19 +66,6 @@ fn add_dll_dir(dir: &str) {
     unsafe { SetDllDirectoryW(to_wide(dir).as_ptr()) };
 }
 
-/// Return the 8.3 short-path form of an existing path (strips spaces), or None
-/// if the volume has 8.3 names disabled / the call fails.
-#[cfg(windows)]
-fn short_path(path: &str) -> Option<String> {
-    let wide = to_wide(path);
-    let mut buf = vec![0u16; 1024];
-    let len = unsafe { GetShortPathNameW(wide.as_ptr(), buf.as_mut_ptr(), buf.len() as u32) };
-    if len == 0 || (len as usize) >= buf.len() {
-        return None;
-    }
-    Some(String::from_utf16_lossy(&buf[..len as usize]))
-}
-
 /// The native protocol DLL, loaded exactly once for the process lifetime.
 ///
 /// We deliberately never unload it: this DLL keeps global/static server state
@@ -95,122 +81,24 @@ static DLL: OnceLock<Library> = OnceLock::new();
 static SERVER_NAME: Mutex<Option<CString>> = Mutex::new(None);
 
 /// Load the DLL once (idempotent). Subsequent calls return the cached instance.
+///
+/// A path containing a space is fine. It was not always: loading from one used
+/// to hang forever, because the bundled FFmpeg DLLs were Cygwin builds that
+/// pulled in `msys-2.0.dll` and its path mangling. This DLL decodes nothing and
+/// imports neither, and loads from a spaced path in milliseconds.
 fn load_dll(dll_path: &str) -> Result<&'static Library, String> {
     if let Some(lib) = DLL.get() {
         return Ok(lib);
     }
-    let load_path = resolve_space_free_dll(dll_path)?;
     #[cfg(windows)]
-    if let Some(parent) = std::path::Path::new(&load_path).parent() {
+    if let Some(parent) = std::path::Path::new(dll_path).parent() {
         add_dll_dir(&parent.to_string_lossy());
     }
-    let lib = unsafe { Library::new(&load_path) }
-        .map_err(|e| format!("无法加载协议库 DLL ({load_path}): {e}"))?;
+    let lib = unsafe { Library::new(dll_path) }
+        .map_err(|e| format!("无法加载协议库 DLL ({dll_path}): {e}"))?;
     // If another thread raced us, keep whichever won; both are the same DLL.
     let _ = DLL.set(lib);
     Ok(DLL.get().unwrap())
-}
-
-/// Resolve a load path for `airplay2dll.dll` with no space in any component.
-///
-/// A space in the path used to hang `mirror_start` forever. The cause was the
-/// bundled FFmpeg DLLs, which were Cygwin builds pulling in `msys-2.0.dll` and
-/// its path mangling; the current DLL decodes nothing and imports neither, and
-/// a spaced path now loads and starts in milliseconds. This is kept as cheap
-/// insurance — it is a no-op for paths without a space — and can be dropped
-/// once the installed build has been exercised from `C:\Program Files\…`.
-#[cfg(windows)]
-fn resolve_space_free_dll(dll_path: &str) -> Result<String, String> {
-    if !dll_path.contains(' ') {
-        return Ok(dll_path.to_string());
-    }
-    if let Some(sp) = short_path(dll_path) {
-        if !sp.contains(' ') {
-            return Ok(sp);
-        }
-    }
-    stage_dlls_space_free(dll_path)
-}
-
-#[cfg(not(windows))]
-fn resolve_space_free_dll(dll_path: &str) -> Result<String, String> {
-    Ok(dll_path.to_string())
-}
-
-/// Copy every DLL sitting next to `dll_path` into a space-free directory and
-/// return the staged path of `airplay2dll.dll`. Used only when 8.3 short names
-/// are unavailable on the install volume.
-#[cfg(windows)]
-fn stage_dlls_space_free(dll_path: &str) -> Result<String, String> {
-    let src_path = std::path::Path::new(dll_path);
-    let src_dir = src_path.parent().ok_or("无法解析 DLL 目录")?;
-    let dll_name = src_path.file_name().ok_or("无法解析 DLL 文件名")?;
-
-    let root = pick_space_free_root()?;
-    let dst_dir = std::path::Path::new(&root).join("airplay-mirror-lib");
-    std::fs::create_dir_all(&dst_dir).map_err(|e| format!("创建暂存目录失败：{e}"))?;
-
-    for entry in std::fs::read_dir(src_dir).map_err(|e| e.to_string())?.flatten() {
-        let p = entry.path();
-        let is_dll = p
-            .extension()
-            .map(|e| e.eq_ignore_ascii_case("dll"))
-            .unwrap_or(false);
-        if !is_dll {
-            continue;
-        }
-        let dst = dst_dir.join(entry.file_name());
-        // Idempotent: only copy when missing or a different size.
-        let need = match (std::fs::metadata(&p), std::fs::metadata(&dst)) {
-            (Ok(a), Ok(b)) => a.len() != b.len(),
-            _ => true,
-        };
-        if need {
-            std::fs::copy(&p, &dst).map_err(|e| format!("复制 {:?} 失败：{e}", entry.file_name()))?;
-        }
-    }
-
-    let staged = dst_dir.join(dll_name).to_string_lossy().to_string();
-    if staged.contains(' ') {
-        // Staging root had a space and no 8.3 form — try short-pathing it.
-        if let Some(sp) = short_path(&staged) {
-            if !sp.contains(' ') {
-                return Ok(sp);
-            }
-        }
-        return Err("无法找到无空格的 DLL 加载路径".to_string());
-    }
-    Ok(staged)
-}
-
-/// Pick a directory root with no space in its path (short-pathing candidates as
-/// needed). Prefers TEMP, then ProgramData, then the system drive root.
-#[cfg(windows)]
-fn pick_space_free_root() -> Result<String, String> {
-    let mut candidates: Vec<String> = Vec::new();
-    if let Ok(t) = std::env::var("TEMP") {
-        candidates.push(t);
-    }
-    if let Ok(pd) = std::env::var("ProgramData") {
-        candidates.push(pd);
-    }
-    candidates.push(
-        std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_string()) + "\\",
-    );
-    for c in candidates {
-        if !std::path::Path::new(&c).exists() {
-            continue;
-        }
-        if !c.contains(' ') {
-            return Ok(c);
-        }
-        if let Some(sp) = short_path(&c) {
-            if !sp.contains(' ') {
-                return Ok(sp);
-            }
-        }
-    }
-    Err("找不到无空格的暂存目录".to_string())
 }
 
 // ── ABI ──────────────────────────────────────────────────────────────────
@@ -434,18 +322,24 @@ pub fn stop_mirror() -> Result<(), String> {
     Ok(())
 }
 
-/// Locate the protocol library inside the bundled resources directory.
+/// Locate the protocol library inside the app's bundled resources.
 ///
 /// Looks for a few common names so the user doesn't have to rename precisely.
-pub fn locate_dll(resources_dir: &std::path::Path) -> Option<String> {
+pub fn locate_dll(app: &AppHandle) -> Option<String> {
     const CANDIDATES: &[&str] = &[
         "airplay_bridge.dll",
         "airplay2dll.dll",
         "airplayserverlib.dll",
         "libairplay.dll",
     ];
+    let dir = app
+        .path()
+        .resource_dir()
+        .ok()?
+        .join("resources")
+        .join("airplay");
     for name in CANDIDATES {
-        let p = resources_dir.join(name);
+        let p = dir.join(name);
         if p.exists() {
             return Some(p.to_string_lossy().to_string());
         }

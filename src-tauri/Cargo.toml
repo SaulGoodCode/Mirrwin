@@ -17,9 +17,15 @@ tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 base64 = "0.22"
-# FFI bridge to the native AirPlay protocol DLL (xenos1337/AirPlayServer style).
-# We load the C library at runtime, start the receiver via its C ABI, and read
-# the decrypted H.264 it muxes to a named pipe (rendered by WebCodecs in the UI).
+# FFI bridge to the native AirPlay protocol DLL (xenos1337/AirPlayServer plus
+# the overlay in tools/airplay-dll). We load the C library at runtime and start
+# the receiver via its C ABI; it hands back H.264 and connect/disconnect events
+# through callbacks. See docs/ffi-contract.md.
+libloading = "0.8"
+
+[dev-dependencies]
+# tests/dll_load.rs exercises the real DLL through the same loader production
+# uses, so it must be available to the integration test as well.
 libloading = "0.8"
 
 [features]
