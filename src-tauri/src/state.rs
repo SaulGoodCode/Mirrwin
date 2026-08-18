@@ -1,5 +1,4 @@
-use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 /// Application-wide shared state, wrapped in an `Arc` and managed by Tauri.
 ///
@@ -19,13 +18,8 @@ pub struct AppState {
     pub connected_device: Mutex<Option<String>>,
     pub demo: Mutex<bool>,
     pub save_dir: Mutex<String>,
-    /// Whether the native protocol+decode DLL was located at startup.
+    /// Whether the native protocol DLL was located at startup.
     pub mirror_lib_present: Mutex<bool>,
-    /// Per-session stop flag for the pipe-forwarder thread. Each start installs
-    /// a fresh flag; stop takes and clears it. Using a fresh Arc per session (vs
-    /// one shared bool) prevents a quick stop→start from resurrecting the old
-    /// forwarder, which would fight the new one over the single-instance pipe.
-    pub streaming: Mutex<Option<Arc<AtomicBool>>>,
 }
 
 impl Default for AppState {
@@ -41,7 +35,6 @@ impl Default for AppState {
             demo: Mutex::new(false),
             save_dir: Mutex::new(String::new()),
             mirror_lib_present: Mutex::new(false),
-            streaming: Mutex::new(None),
         }
     }
 }

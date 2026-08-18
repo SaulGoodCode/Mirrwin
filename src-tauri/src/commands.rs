@@ -1,5 +1,4 @@
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use base64::engine::general_purpose::STANDARD as B64;
@@ -101,9 +100,9 @@ pub async fn start_mirror(
         return Ok(read_status(state.inner()));
     }
 
-    // Real mode: load the native protocol + FFmpeg decode library. It decodes
-    // H.264 to YUV420 and hands each frame back through `on_frame`, which we
-    // ship to the webview over a binary `Channel` for WebGL rendering.
+    // Real mode: load the native protocol library. It runs the AirPlay stack
+    // and hands back the H.264 elementary stream, which we forward to the
+    // webview over a binary `Channel` for WebCodecs to decode.
     *state.mode.lock().unwrap() = "real".to_string();
     let res_dir = ffmpeg_resources_dir(&app)
         .ok_or_else(|| "无法定位 resources 目录（打包异常）".to_string())?;
@@ -124,19 +123,21 @@ pub async fn start_mirror(
     // native DLL and corrupt its global server handle (a crash source).
     let _guard = StartingGuard::try_new(&state.starting)?;
 
-    ffi::start_mirror(&dll_path, &name, port, width, height, fps)
-        .map_err(|e| format!("启动原生协议库失败：{e}"))?;
+    // The DLL delivers H.264 and connect/disconnect edges through callbacks, so
+    // starting the receiver is all there is to do — no reader thread to spawn.
+    ffi::start_mirror(
+        &dll_path,
+        &name,
+        port,
+        width,
+        height,
+        fps,
+        frame_channel,
+        app.clone(),
+    )
+    .map_err(|e| format!("启动原生协议库失败：{e}"))?;
 
     *state.running.lock().unwrap() = true;
-
-    // The prebuilt DLL only muxes raw H.264 to \\.\pipe\AirPlayVideo (it never
-    // calls frame_cb — verified at runtime). Read that pipe and forward the
-    // H.264 to the webview, which decodes it with WebCodecs and renders to the
-    // canvas. This reader also keeps the DLL's writer from blocking. A fresh
-    // per-session stop flag prevents an old forwarder from lingering.
-    let flag = Arc::new(std::sync::atomic::AtomicBool::new(true));
-    *state.streaming.lock().unwrap() = Some(flag.clone());
-    ffi::spawn_pipe_forwarder(frame_channel, flag, app.clone());
 
     emit_status(&app, state.inner());
     Ok(read_status(state.inner()))
@@ -147,16 +148,13 @@ pub async fn stop_mirror(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<ReceiverStatus, String> {
-    // Flip running first so any watchers unwind, and signal the pipe forwarder
-    // thread to stop reading (its own per-session flag).
+    // Flip running first so any watchers unwind. No state lock may be held
+    // across ffi::stop_mirror — it joins the DLL's network threads, which run
+    // the callbacks that touch this same state.
     *state.running.lock().unwrap() = false;
-    if let Some(flag) = state.streaming.lock().unwrap().take() {
-        flag.store(false, Ordering::Relaxed);
-    }
 
     let _ = ffi::stop_mirror();
     *state.connected_device.lock().unwrap() = None;
-    let _ = app; // reserved for future teardown hooks
     emit_status(&app, state.inner());
     Ok(read_status(state.inner()))
 }

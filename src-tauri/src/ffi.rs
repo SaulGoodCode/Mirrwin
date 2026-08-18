@@ -1,69 +1,55 @@
-//! FFI bridge to the native AirPlay protocol + FFmpeg decode library.
+//! FFI bridge to the native AirPlay protocol library.
 //!
-//! We deliberately do NOT launch `uxplay.exe`. Instead we `dlopen` a native C
-//! library (built from xenos1337/AirPlayServer's `AirPlayServerLib` +
-//! `airplay2dll`, or any library that honours the ABI below) and receive the
-//! H.264 stream already decoded into YUV420 planar buffers through a C callback.
-//! Rust then forwards those raw frames to the frontend over a Tauri binary
-//! `Channel` (efficient, no base64 bloat). The frontend renders YUV420 -> RGB
-//! via WebGL.
+//! We `dlopen` `airplay2dll.dll` (built from xenos1337/AirPlayServer plus the
+//! overlay in `tools/airplay-dll/` — see `tools/build-airplay-dll.sh`) and let
+//! it run the AirPlay stack: mDNS advertisement, RTSP/RTP, FairPlay. It hands
+//! back the H.264 elementary stream as it arrives, which we forward to the
+//! webview over a Tauri binary `Channel`; the frontend decodes it with
+//! WebCodecs. Nothing here decodes video, and no named pipe is involved.
 //!
-//! ## C ABI contract (the native library must export these)
+//! ## C ABI contract (see `tools/airplay-dll/Bridge.cpp`)
 //!
 //! ```c
-//! typedef void (*frame_cb)(
-//!     const uint8_t* y, const uint8_t* u, const uint8_t* v,
-//!     int width, int height,
-//!     int stride_y, int stride_u, int stride_v,
-//!     void* userdata);
+//! // frame_type: 0 = SPS/PPS parameter sets, 1 = picture data
+//! typedef void (*video_cb)(const uint8_t* data, int len, int frame_type);
+//! // event: 0 = connected, 1 = disconnected
+//! typedef void (*state_cb)(int event, const char* remote_name, const char* device_id);
 //!
 //! typedef struct {
-//!     const char* device_name; // UTF-8, e.g. "AirPlay Mirror"
-//!     int         rtsp_port;   // 0 = default (7000)
-//!     int         width;       // requested capture width (0 = auto)
-//!     int         height;      // requested capture height (0 = auto)
-//!     int         fps;         // requested fps (0 = auto)
-//!     void*       userdata;    // opaque, passed back to frame_cb
+//!     const char*  server_name;
+//!     unsigned int raop_port;
+//!     unsigned int airplay_port;
+//!     const char*  password;
+//!     int width, height, fps;   // reserved
 //! } mirror_cfg;
 //!
-//! // returns 0 on success, non-zero on failure
-//! int  mirror_start(const mirror_cfg* cfg, frame_cb cb);
+//! int  mirror_start_ex(const mirror_cfg* cfg, video_cb vcb, state_cb scb);
 //! void mirror_stop(void);
 //! ```
 //!
-//! The library is responsible for: mDNS advertisement, RTSP/RTP handshake,
-//! FairPlay session, and H.264 decode (via FFmpeg). It only needs to hand us
-//! the decoded YUV420 planes. See `docs/ffi-contract.md` for a reference C
-//! shim that wraps the SDL renderer in xenos1337's project.
+//! Both callbacks run on the DLL's network threads, so they must return
+//! promptly and must not hold a lock across a call back into the DLL. The
+//! `data` pointer is only valid for the duration of the call.
 
-use std::ffi::{c_char, CString};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::ffi::{c_char, CStr, CString};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use libloading::{Library, Symbol};
 use tauri::ipc::Channel;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
+
+use crate::state::AppState;
 
 // ── Windows DLL search-path fix ──────────────────────────────────────────
 // `Library::new()` calls `LoadLibraryExW` with an absolute path, but Windows
 // does NOT search the DLL's own directory for its dependencies by default.
-// `airplay2dll.dll` depends on `avcodec-58.dll`, `avutil-56.dll`,
-// `swscale-5.dll`, `libwinpthread-1.dll`, and `msys-2.0.dll` — all sitting
-// right next to it in `resources/ffmpeg/`. `SetDllDirectoryW` adds that
-// directory to the search path so Windows can find them.
+// `airplay2dll.dll` needs `libwinpthread-1.dll` from the same directory, so
+// `SetDllDirectoryW` puts that directory on the search path.
 #[cfg(windows)]
 #[link(name = "kernel32")]
 extern "system" {
     fn SetDllDirectoryW(lpPathName: *const u16) -> i32;
     fn GetShortPathNameW(long: *const u16, short: *mut u16, cch: u32) -> u32;
-    fn PeekNamedPipe(
-        h: *mut core::ffi::c_void,
-        buf: *mut core::ffi::c_void,
-        n_buf: u32,
-        bytes_read: *mut u32,
-        total_avail: *mut u32,
-        bytes_left: *mut u32,
-    ) -> i32;
 }
 
 #[cfg(windows)]
@@ -99,24 +85,20 @@ fn short_path(path: &str) -> Option<String> {
 /// We deliberately never unload it: this DLL keeps global/static server state
 /// and spawns its own worker threads, so `FreeLibrary`-then-reload on every
 /// stop/start is a crash and hang source. Loading once and calling
-/// `mirror_start`/`mirror_stop` on the same instance lets the receiver be
+/// `mirror_start_ex`/`mirror_stop` on the same instance lets the receiver be
 /// stopped and restarted cleanly within one session.
 static DLL: OnceLock<Library> = OnceLock::new();
 
-/// Diagnostic counter for `on_frame`. The current prebuilt DLL never calls the
-/// callback (it muxes H.264 to a pipe instead), so this stays at 0 — but if a
-/// future DLL rebuild wires up `outputVideo`→`frame_cb`, this log will show it.
-static FRAME_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// Keeps the device-name buffer alive for the duration of a session. The DLL
+/// only reads it during registration, but it costs nothing to outlive the call
+/// and it removes a class of dangling-pointer question from the FFI boundary.
+static SERVER_NAME: Mutex<Option<CString>> = Mutex::new(None);
 
 /// Load the DLL once (idempotent). Subsequent calls return the cached instance.
 fn load_dll(dll_path: &str) -> Result<&'static Library, String> {
     if let Some(lib) = DLL.get() {
         return Ok(lib);
     }
-    // CRITICAL: the MSYS2/FFmpeg DLL chain hangs (mirror_start never returns) when
-    // loaded from a directory whose path contains a space — e.g. the default
-    // install path `...\AirPlay Mirror\resources\ffmpeg`. Resolve a space-free
-    // path before loading. Verified: an 8.3 short path (or a staged copy) fixes it.
     let load_path = resolve_space_free_dll(dll_path)?;
     #[cfg(windows)]
     if let Some(parent) = std::path::Path::new(&load_path).parent() {
@@ -129,11 +111,14 @@ fn load_dll(dll_path: &str) -> Result<&'static Library, String> {
     Ok(DLL.get().unwrap())
 }
 
-/// Resolve a path to `airplay2dll.dll` that contains **no space** in any
-/// component, because the DLL's runtime hangs otherwise. Strategy:
-/// 1. If the given path already has no space, use it.
-/// 2. Try the 8.3 short path (strips spaces where 8.3 names are enabled).
-/// 3. Fall back to copying all sibling DLLs into a space-free staging dir.
+/// Resolve a load path for `airplay2dll.dll` with no space in any component.
+///
+/// A space in the path used to hang `mirror_start` forever. The cause was the
+/// bundled FFmpeg DLLs, which were Cygwin builds pulling in `msys-2.0.dll` and
+/// its path mangling; the current DLL decodes nothing and imports neither, and
+/// a spaced path now loads and starts in milliseconds. This is kept as cheap
+/// insurance — it is a no-op for paths without a space — and can be dropped
+/// once the installed build has been exercised from `C:\Program Files\…`.
 #[cfg(windows)]
 fn resolve_space_free_dll(dll_path: &str) -> Result<String, String> {
     if !dll_path.contains(' ') {
@@ -228,24 +213,12 @@ fn pick_space_free_root() -> Result<String, String> {
     Err("找不到无空格的暂存目录".to_string())
 }
 
-/// Matches the ACTUAL exported ABI of `airplay2dll.dll`'s `Bridge.cpp`:
-/// `void frame_cb(const uint8_t* y,u,v, int w,h, int sy,su,sv)` — note there
-/// is NO trailing `userdata` argument (the earlier Rust signature had a spare
-/// one that the DLL never pushes).
-type FrameCb = unsafe extern "C" fn(
-    *const u8,
-    *const u8,
-    *const u8,
-    i32,
-    i32,
-    i32,
-    i32,
-    i32,
-);
+// ── ABI ──────────────────────────────────────────────────────────────────
 
-/// Byte-for-byte match of `Bridge.cpp`'s `struct mirror_cfg`:
-/// `{ const char* server_name; unsigned raop_port; unsigned airplay_port;
-///    const char* password; int width; int height; int fps; }`.
+type VideoCb = unsafe extern "C" fn(*const u8, i32, i32);
+type StateCb = unsafe extern "C" fn(i32, *const c_char, *const c_char);
+
+/// Byte-for-byte match of `Bridge.cpp`'s `struct mirror_cfg`.
 #[repr(C)]
 struct MirrorCfg {
     server_name: *const c_char,
@@ -257,149 +230,138 @@ struct MirrorCfg {
     fps: i32,
 }
 
-type MirrorStart = unsafe extern "C" fn(*const MirrorCfg, FrameCb) -> i32;
+type MirrorStartEx = unsafe extern "C" fn(*const MirrorCfg, VideoCb, StateCb) -> i32;
 type MirrorStop = unsafe extern "C" fn();
 
-/// C callback the DLL *would* invoke per decoded YUV frame. `mirror_start`
-/// requires a non-null callback, but this prebuilt DLL never calls it (video is
-/// delivered via the H.264 named pipe instead — see `spawn_pipe_forwarder`), so
-/// this only logs if the situation ever changes.
-unsafe extern "C" fn on_frame(
-    _y: *const u8,
-    _u: *const u8,
-    _v: *const u8,
-    width: i32,
-    height: i32,
-    _stride_y: i32,
-    _stride_u: i32,
-    _stride_v: i32,
-) {
-    let n = FRAME_COUNT.fetch_add(1, Ordering::Relaxed);
-    if n < 3 {
-        eprintln!("[ffi] on_frame #{n}: {width}x{height} (unexpected — DLL now calls frame_cb)");
-    }
+const EVENT_CONNECTED: i32 = 0;
+const EVENT_DISCONNECTED: i32 = 1;
+
+// ── callback sink ────────────────────────────────────────────────────────
+
+/// Where the DLL's callbacks deliver to. The C ABI carries no userdata, so the
+/// destination has to be reachable from a plain `extern "C" fn`.
+struct Sink {
+    channel: Channel<Vec<u8>>,
+    app: AppHandle,
 }
 
-/// Read the DLL's H.264 Annex-B named pipe and forward every chunk to the
-/// frontend over the binary `Channel`.
-///
-/// The prebuilt `airplay2dll.dll` only muxes the raw H.264 elementary stream to
-/// `\\.\pipe\AirPlayVideo`; it never invokes `frame_cb` (verified at runtime —
-/// `on_frame` is never called). So instead of relying on the dead YUV callback,
-/// we read that pipe here and ship the H.264 to the webview, which decodes it
-/// with WebCodecs. This is also the reader that keeps the DLL's writer from
-/// blocking, so no separate drain thread is needed.
-#[cfg(windows)]
-pub fn spawn_pipe_forwarder(channel: Channel<Vec<u8>>, running: Arc<AtomicBool>, app: AppHandle) {
-    use std::io::Read;
-    use std::os::windows::io::AsRawHandle;
-    std::thread::spawn(move || {
-        const PIPE: &str = r"\\.\pipe\AirPlayVideo";
-        // Outer loop: (re)connect the pipe once per mirroring session so the
-        // iPhone can disconnect and reconnect without restarting the receiver.
-        while running.load(Ordering::Relaxed) {
-            // Open the pipe (with retries — the DLL (re)creates it per session).
-            let mut file = None;
-            for _ in 0..100 {
-                if !running.load(Ordering::Relaxed) {
-                    return;
-                }
-                match std::fs::OpenOptions::new().read(true).open(PIPE) {
-                    Ok(f) => {
-                        file = Some(f);
-                        break;
-                    }
-                    Err(_) => std::thread::sleep(std::time::Duration::from_millis(50)),
-                }
-            }
-            let Some(mut f) = file else {
-                // Not available yet; keep waiting while running.
-                std::thread::sleep(std::time::Duration::from_millis(200));
-                continue;
-            };
-            eprintln!("[forward] connected to {PIPE}; forwarding H.264 to webview");
-            let handle = f.as_raw_handle() as *mut core::ffi::c_void;
-            let mut buf = vec![0u8; 128 * 1024];
-            let mut got_data = false;
-            let mut last_data = std::time::Instant::now();
-            let mut ended_signaled = false;
-            // How long the (still-open) pipe must stay silent before we treat it
-            // as a disconnect. This DLL does NOT close the pipe when the iPhone
-            // stops AirPlay — it just goes quiet — so pipe-close alone never
-            // fires. A static-but-connected screen also goes quiet, but only for
-            // short gaps; this threshold sits above those. Tunable (raise if a
-            // static screen flickers to 接收中; lower for a snappier clear).
-            const IDLE_DISCONNECT: std::time::Duration = std::time::Duration::from_secs(3);
+static SINK: RwLock<Option<Sink>> = RwLock::new(None);
 
-            // Inner loop: forward this session's H.264. The session ends either
-            // when the pipe CLOSES or when it stays silent past IDLE_DISCONNECT.
-            loop {
-                if !running.load(Ordering::Relaxed) {
-                    return;
-                }
-                let mut avail: u32 = 0;
-                let ok = unsafe {
-                    PeekNamedPipe(
-                        handle,
-                        std::ptr::null_mut(),
-                        0,
-                        std::ptr::null_mut(),
-                        &mut avail,
-                        std::ptr::null_mut(),
-                    )
-                };
-                if ok == 0 {
-                    eprintln!("[forward] pipe closed — session ended");
-                    break;
-                }
-                if avail == 0 {
-                    // Silent. If we'd been streaming and it's been quiet too long,
-                    // signal disconnect ONCE so the UI clears the frozen frame.
-                    if got_data && !ended_signaled && last_data.elapsed() >= IDLE_DISCONNECT {
-                        eprintln!(
-                            "[forward] no data for {}s — signalling disconnect",
-                            IDLE_DISCONNECT.as_secs()
-                        );
-                        let _ = app.emit("video_ended", ());
-                        ended_signaled = true;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(5));
-                    continue;
-                }
-                match f.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        got_data = true;
-                        last_data = std::time::Instant::now();
-                        ended_signaled = false; // stream is live again
-                        if channel.send(buf[..n].to_vec()).is_err() {
-                            return; // frontend channel gone
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
+/// Per-session H.264 byte counter, for the first-frame log line only.
+static STREAM_BYTES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-            // Pipe closed. If we were streaming and haven't already signalled the
-            // idle disconnect, tell the UI now. Then loop to re-open for the next
-            // session (iPhone reconnect / new AirPlay session).
-            if got_data && !ended_signaled {
-                let _ = app.emit("video_ended", ());
+/// Called by the DLL for each H.264 access unit, on its network thread.
+/// `data` is freed as soon as this returns, so the bytes are copied here.
+unsafe extern "C" fn on_video(data: *const u8, len: i32, frame_type: i32) {
+    if data.is_null() || len <= 0 {
+        return;
+    }
+    let bytes = std::slice::from_raw_parts(data, len as usize).to_vec();
+    // A panic unwinding into the DLL's thread would abort the process, so the
+    // Rust side of every callback is contained.
+    guard_callback(move || {
+        let prev = STREAM_BYTES.fetch_add(bytes.len(), std::sync::atomic::Ordering::Relaxed);
+        if prev == 0 {
+            eprintln!("[ffi] first H.264 packet: frame_type={frame_type} len={len}");
+        }
+        if let Ok(guard) = SINK.read() {
+            if let Some(sink) = guard.as_ref() {
+                let _ = sink.channel.send(bytes);
             }
-            std::thread::sleep(std::time::Duration::from_millis(100));
         }
     });
 }
 
-#[cfg(not(windows))]
-pub fn spawn_pipe_forwarder(_channel: Channel<Vec<u8>>, _running: Arc<AtomicBool>, _app: AppHandle) {}
+/// Called by the DLL when a device starts or stops mirroring, on its network
+/// thread. AirPlayServerLib raises this from `raop_rtp_start_mirror` and
+/// `raop_rtp_mirror_stop`, so a disconnect is reported both for a clean RTSP
+/// TEARDOWN and for an abruptly dropped socket.
+unsafe extern "C" fn on_state(event: i32, name: *const c_char, id: *const c_char) {
+    let name = cstr_to_string(name);
+    let id = cstr_to_string(id);
+    guard_callback(move || on_state_inner(event, name, id));
+}
+
+fn on_state_inner(event: i32, name: String, id: String) {
+    let label = match event {
+        EVENT_CONNECTED => "connected",
+        EVENT_DISCONNECTED => "disconnected",
+        // Ignore codes this build does not know rather than mistaking one for
+        // a disconnect and clearing the picture.
+        other => {
+            eprintln!("[ffi] state: unknown event {other}, ignored");
+            return;
+        }
+    };
+    eprintln!("[ffi] state: {label} name='{name}' id='{id}'");
+
+    // Clone the handle out so no lock is held while emitting.
+    let app = match SINK.read() {
+        Ok(guard) => match guard.as_ref() {
+            Some(sink) => sink.app.clone(),
+            None => return,
+        },
+        Err(_) => return,
+    };
+
+    let display = if name.is_empty() { id } else { name };
+    let state = app.state::<Arc<AppState>>().inner().clone();
+
+    if event == EVENT_CONNECTED {
+        *state.connected_device.lock().unwrap() = Some(display.clone());
+        let _ = app.emit("device_connected", display);
+    } else {
+        STREAM_BYTES.store(0, std::sync::atomic::Ordering::Relaxed);
+        *state.connected_device.lock().unwrap() = None;
+        // The frontend keeps the last picture up until this fires — it is the
+        // authoritative "stopped mirroring" edge, not a guess from idle time.
+        let _ = app.emit("video_ended", ());
+    }
+    crate::commands::emit_status(&app, &state);
+}
+
+/// Run a callback body so that a panic is reported instead of unwinding into
+/// the C++ frames that called us.
+fn guard_callback(f: impl FnOnce()) {
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).is_err() {
+        eprintln!("[ffi] panic inside a native callback was contained");
+    }
+}
+
+fn cstr_to_string(p: *const c_char) -> String {
+    if p.is_null() {
+        return String::new();
+    }
+    unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned()
+}
+
+/// Install the callback destination. Must happen before `mirror_start_ex`,
+/// since the DLL may call back immediately.
+fn set_sink(channel: Channel<Vec<u8>>, app: AppHandle) {
+    if let Ok(mut guard) = SINK.write() {
+        *guard = Some(Sink { channel, app });
+    }
+    STREAM_BYTES.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Drop the callback destination. Only call this *after* the DLL has stopped:
+/// taking the write lock while a callback holds the read lock inside a thread
+/// the DLL is joining would deadlock.
+fn clear_sink() {
+    if let Ok(mut guard) = SINK.write() {
+        *guard = None;
+    }
+}
+
+// ── public API ───────────────────────────────────────────────────────────
 
 /// Start mirroring on the (persistently loaded) native library.
 ///
-/// `dll_path` points to the protocol+decode DLL. The `port` configures the
-/// AirPlay (`_airplay._tcp`) service the iPhone connects to for screen
-/// mirroring; RAOP audio uses `port - 1`. `width`/`height`/`fps` request a
-/// capture size (0 = native).
+/// `port` is the AirPlay (`_airplay._tcp`) port the iPhone connects to for
+/// screen mirroring; RAOP audio uses `port - 1`. `width`/`height`/`fps` are
+/// accepted for ABI compatibility but the receiver always uses the device's
+/// native stream.
+#[allow(clippy::too_many_arguments)]
 pub fn start_mirror(
     dll_path: &str,
     device_name: &str,
@@ -407,22 +369,28 @@ pub fn start_mirror(
     width: u32,
     height: u32,
     fps: u32,
+    channel: Channel<Vec<u8>>,
+    app: AppHandle,
 ) -> Result<(), String> {
     let lib = load_dll(dll_path)?;
 
-    let start: Symbol<MirrorStart> = unsafe {
-        lib.get(b"mirror_start\0")
-            .map_err(|_| "DLL 缺少导出符号 `mirror_start`".to_string())?
+    let start: Symbol<MirrorStartEx> = unsafe {
+        lib.get(b"mirror_start_ex\0").map_err(|_| {
+            "DLL 缺少导出符号 `mirror_start_ex`（协议库版本过旧，请用 \
+             tools/build-airplay-dll.sh 重新构建）"
+                .to_string()
+        })?
     };
 
     let c_name = CString::new(device_name)
         .map_err(|_| "设备名包含非法字符 (NUL)".to_string())?;
 
-    // RAOP (audio) and AirPlay (mirroring) must be distinct ports. The UI's
-    // configured `port` (default 7000) is the AirPlay/mirroring port; RAOP
-    // takes the port just below it.
     let airplay_port = port as u32;
     let raop_port = port.saturating_sub(1) as u32;
+
+    // Callbacks can fire before mirror_start_ex returns.
+    set_sink(channel, app);
+
     let cfg = MirrorCfg {
         server_name: c_name.as_ptr(),
         raop_port,
@@ -434,18 +402,17 @@ pub fn start_mirror(
     };
 
     eprintln!(
-        "[ffi] mirror_start: name='{device_name}' raop_port={raop_port} airplay_port={airplay_port} \
-         size={width}x{height}@{fps}"
+        "[ffi] mirror_start_ex: name='{device_name}' raop_port={raop_port} \
+         airplay_port={airplay_port} size={width}x{height}@{fps}"
     );
-    let rc = unsafe { start(&cfg as *const MirrorCfg, on_frame) };
-    eprintln!("[ffi] mirror_start returned rc={rc}");
+    let rc = unsafe { start(&cfg as *const MirrorCfg, on_video, on_state) };
+    eprintln!("[ffi] mirror_start_ex returned rc={rc}");
     if rc != 0 {
-        return Err(format!("mirror_start 返回错误码 {rc}"));
+        clear_sink();
+        return Err(format!("mirror_start_ex 返回错误码 {rc}"));
     }
 
-    // Keep the CString alive for the session.
-    std::mem::forget(c_name);
-
+    *SERVER_NAME.lock().unwrap() = Some(c_name);
     Ok(())
 }
 
@@ -458,8 +425,12 @@ pub fn stop_mirror() -> Result<(), String> {
     let stop: Result<Symbol<MirrorStop>, _> = unsafe { lib.get(b"mirror_stop\0") };
     if let Ok(stop) = stop {
         eprintln!("[ffi] mirror_stop");
+        // No Rust lock may be held here: mirror_stop joins the DLL's network
+        // threads, and those threads take the sink's read lock.
         unsafe { stop() };
     }
+    clear_sink();
+    *SERVER_NAME.lock().unwrap() = None;
     Ok(())
 }
 
@@ -481,4 +452,3 @@ pub fn locate_dll(resources_dir: &std::path::Path) -> Option<String> {
     }
     None
 }
-

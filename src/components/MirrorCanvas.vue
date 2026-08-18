@@ -49,7 +49,8 @@ function drawFrame(frame: VideoFrame) {
   // As long as frames arrive we're mirroring. There is deliberately NO
   // "no frames for N seconds → disconnected" watchdog: a static iPhone screen
   // legitimately sends no frames for long stretches. Disconnect is instead
-  // signalled by the backend `video_ended` event (real pipe close).
+  // signalled by the backend `video_ended` event, which the protocol library
+  // raises when the device actually stops mirroring.
   mirroring.value = true
 }
 

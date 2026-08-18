@@ -1,11 +1,12 @@
 // WebCodecs H.264 (Annex-B) decoder.
 //
-// The native AirPlay DLL muxes a raw H.264 Annex-B elementary stream to a named
-// pipe; Rust forwards those bytes to us over a Tauri channel. We reassemble NAL
-// units, configure a hardware `VideoDecoder` from the stream's SPS, and emit
-// decoded `VideoFrame`s. WebView2 (Chromium 150) supports WebCodecs with
-// hardware acceleration, so this decodes 1080p60 with negligible CPU and draws
-// straight into the app's own canvas — no external player, no window embedding.
+// The native AirPlay DLL hands the raw H.264 Annex-B elementary stream to Rust
+// as it arrives, and Rust forwards those bytes to us over a Tauri channel. We
+// reassemble NAL units, configure a hardware `VideoDecoder` from the stream's
+// SPS, and emit decoded `VideoFrame`s. WebView2 (Chromium 150) supports
+// WebCodecs with hardware acceleration, so this decodes 1080p60 with negligible
+// CPU and draws straight into the app's own canvas — no external player, no
+// window embedding.
 
 export interface H264DecoderOptions {
   onFrame: (frame: VideoFrame) => void

@@ -1,21 +1,51 @@
 #!/usr/bin/env bash
+# Build airplay2dll.dll from upstream xenos1337/AirPlayServer plus the overlay
+# in tools/airplay-dll/.
+#
+#   tools/build-airplay-dll.sh [path-to-upstream-checkout]
+#
+# The overlay swaps two things into the upstream tree and changes nothing else:
+#
+#   Bridge.cpp            the C ABI the Rust host calls (mirror_start_ex),
+#                         including the connect/disconnect state callback
+#   FgAirplayChannel.*    a forwarding channel with no FFmpeg decode path, so
+#                         the H.264 elementary stream reaches the host as-is
+#                         and avcodec/swscale/avutil are never linked
+#
+# Requires MSYS2 mingw64 at C:\msys64. Output: <upstream>/build/airplay2dll.dll
 set -e
-# Ensure GCC can create temp files (otherwise it tries C:\Windows\)
+
 export TMP="${TMP:-/tmp}"
 export TEMP="${TEMP:-/tmp}"
 export TMPDIR="${TMPDIR:-/tmp}"
-REPO="$(cd "$(dirname "$0")" && pwd -W)"
+
+OVERLAY="$(cd "$(dirname "$0")/airplay-dll" && pwd)"
+UPSTREAM_DIR="${1:-E:/tmp/xenos/AirPlayServer-research}"
+UPSTREAM_URL="https://github.com/xenos1337/AirPlayServer"
+
+if [[ ! -d "$UPSTREAM_DIR/AirPlayServerLib" ]]; then
+  echo "==> cloning $UPSTREAM_URL -> $UPSTREAM_DIR"
+  git clone --depth 1 "$UPSTREAM_URL" "$UPSTREAM_DIR"
+fi
+
+REPO="$(cd "$UPSTREAM_DIR" && pwd -W)"
 OUT="$REPO/build"
 OBJ="$OUT/obj"
-FFLIB="$OUT/fflib"
 MINGW="/c/msys64/mingw64"
 export PATH="$MINGW/bin:$PATH"
 
 CORE_VCX="$REPO/AirPlayServerLib/AirPlayLib.vcxproj"
 DLL_VCX="$REPO/airplay2dll/airplay2dll.vcxproj"
 
-echo "==> REPO=$REPO"
-echo "==> gcc: $(gcc --version | head -1)"
+echo "==> upstream: $REPO"
+echo "==> overlay:  $OVERLAY"
+echo "==> gcc:      $(gcc --version | head -1)"
+
+# ---------- overlay ----------
+cp "$OVERLAY/Bridge.cpp"            "$REPO/airplay2dll/src/Bridge.cpp"
+cp "$OVERLAY/BridgeTap.h"           "$REPO/airplay2dll/BridgeTap.h"
+cp "$OVERLAY/FgAirplayChannel.h"    "$REPO/airplay2dll/FgAirplayChannel.h"
+cp "$OVERLAY/FgAirplayChannel.cpp"  "$REPO/airplay2dll/FgAirplayChannel.cpp"
 
 # ---------- idempotent source patches (applied before compile) ----------
 # 1) MSVC-only compat clock_gettime conflicts with MinGW winpthreads
@@ -33,10 +63,11 @@ find "$REPO" -type f \( -name '*.c' -o -name '*.h' -o -name '*.cpp' -o -name '*.
   fi
 done
 
+# Deliberately no -I external/ffmpeg/include: a stray libav* include should
+# fail the build rather than quietly restore the dependency we just removed.
 INC=(
   -I"$REPO/airplay2dll"
   -I"$REPO/airplay2dll/include"
-  -I"$REPO/external/ffmpeg/include"
   -I"$REPO/AirPlayServerLib/include"
   -I"$REPO/AirPlayServerLib"
   -I"$REPO/AirPlayServerLib/lib"
@@ -66,10 +97,8 @@ INC=(
 CFLAGS="-DAIRPLAYSERVER_EXPORTS -w -fpermissive -O2"
 CXXFLAGS="$CFLAGS"
 
-mkdir -p "$OBJ" "$FFLIB"
-for n in avcodec swscale avutil; do
-  cp "$REPO/external/ffmpeg/lib/x64/$n.lib" "$FFLIB/lib$n.a"
-done
+rm -rf "$OBJ"
+mkdir -p "$OBJ"
 
 core_srcs=$(grep -o '<ClCompile Include="[^"]*"' "$CORE_VCX" | sed 's/<ClCompile Include="//;s/"//')
 dll_srcs=$(grep -o '<ClCompile Include="[^"]*"' "$DLL_VCX"  | sed 's/<ClCompile Include="//;s/"//')
@@ -107,13 +136,20 @@ ar rcs "$OUT/libairplay.a" "$OBJ"/core_*.o
 
 echo "==> linking airplay2dll.dll"
 g++ -shared -o "$OUT/airplay2dll.dll" "$OBJ"/dll_*.o "$OUT/libairplay.a" \
-  -L"$FFLIB" -lavcodec -lswscale -lavutil \
   -L"$REPO/external/plist/lib/x64" -lplist \
-  -lws2_32 -lwinmm -liphlpapi -lbcrypt -ldnsapi -lcrypt32 -lsecur32 -ladvapi32 -luser32 -lgdi32 -lole32 -luuid -lsetupapi -lwsock32 -static-libgcc -static-libstdc++
+  -lws2_32 -lwinmm -liphlpapi -lbcrypt -ldnsapi -lcrypt32 -lsecur32 -ladvapi32 -luser32 -lgdi32 -lole32 -luuid -lsetupapi -lwsock32 \
+  -static-libgcc -static-libstdc++
 
 echo "==> built: $OUT/airplay2dll.dll"
 ls -la "$OUT/airplay2dll.dll"
+
 echo "==> exports:"
-nm -C -D "$OUT/airplay2dll.dll" 2>/dev/null | grep -iE "mirror_start|mirror_stop|fgServerStart|fgServerStop" || \
-  objdump -p "$OUT/airplay2dll.dll" 2>/dev/null | grep -iE "mirror_start|mirror_stop|fgServerStart|fgServerStop" || \
-  echo "  (could not list exports)"
+objdump -p "$OUT/airplay2dll.dll" | grep -iE "mirror_start_ex|mirror_stop" || {
+  echo "  ERROR: expected exports missing"; exit 1; }
+
+echo "==> imports:"
+objdump -p "$OUT/airplay2dll.dll" | grep -E "^\s+DLL Name" | sort -u
+if objdump -p "$OUT/airplay2dll.dll" | grep -qiE "msys-2\.0\.dll|avcodec|avutil|swscale"; then
+  echo "  ERROR: FFmpeg/MSYS dependency reintroduced"; exit 1
+fi
+echo "==> ok: no FFmpeg/MSYS runtime dependency"

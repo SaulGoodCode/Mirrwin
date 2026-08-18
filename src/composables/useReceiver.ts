@@ -22,8 +22,8 @@ const logs = ref<string[]>([])
 const mirroring = ref(false)
 
 // Subscribers receive each raw H.264 (Annex-B) chunk as it arrives from the
-// backend pipe forwarder. A Set (not a reactive ref) so no chunk is coalesced
-// away — every byte must reach the decoder in order.
+// backend. A Set (not a reactive ref) so no chunk is coalesced away — every
+// byte must reach the decoder in order.
 type FrameHandler = (bytes: Uint8Array) => void
 const frameSubscribers = new Set<FrameHandler>()
 
@@ -48,9 +48,10 @@ async function ensureListeners() {
       if (logs.value.length > 200) logs.value.shift()
     }),
   )
-  // The backend fires this when the H.264 pipe actually closes (iPhone stopped
-  // mirroring / session ended) — the real disconnect signal, as opposed to a
-  // merely idle/static screen (which keeps the picture up).
+  // The backend fires this when the protocol library reports that the device
+  // stopped mirroring (RTSP TEARDOWN or a dropped socket) — the authoritative
+  // disconnect signal, as opposed to a merely idle/static screen (which keeps
+  // the picture up).
   unlisteners.push(
     await listen('video_ended', () => {
       mirroring.value = false
