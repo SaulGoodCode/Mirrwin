@@ -5,6 +5,7 @@
   "permissions": [
     "core:default",
     "core:event:default",
+    "core:window:allow-is-minimized",
     "dialog:default"
   ]
 }

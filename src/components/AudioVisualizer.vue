@@ -8,6 +8,7 @@
 // bars to zero instead of freezing them mid-height.
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { Music } from 'lucide-vue-next'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import { useReceiver } from '@/composables/useReceiver'
 
 const { status, getAudioAnalyser, volumeDb } = useReceiver()
@@ -17,6 +18,23 @@ let raf: number | null = null
 // Typed against ArrayBuffer specifically: getByteFrequencyData rejects a view
 // that might be backed by a SharedArrayBuffer.
 let bins: Uint8Array<ArrayBuffer> | null = null
+// Whether the RAF loop should currently be running. Paused while the window is
+// minimized so we don't burn CPU/GPU on bars nobody can see.
+let rafRunning = false
+
+function startRaf() {
+  if (rafRunning) return
+  rafRunning = true
+  if (raf === null) raf = requestAnimationFrame(draw)
+}
+
+function stopRaf() {
+  rafRunning = false
+  if (raf !== null) {
+    cancelAnimationFrame(raf)
+    raf = null
+  }
+}
 
 const track = computed(() => status.value.track)
 const hasTrack = computed(() => !!(track.value?.title || track.value?.artist))
@@ -81,12 +99,37 @@ function draw() {
   }
 }
 
-onMounted(() => {
-  raf = requestAnimationFrame(draw)
+// Pause the visualizer whenever the window is minimized, resume when it comes
+// back. `tauri://focus` / `tauri://blur` fire on minimize and restore, but blur
+// also fires in other situations (clicking another app), so we re-check
+// `isMinimized()` before pausing or resuming to avoid stutter on alt-tab.
+let unlistenFocus: (() => void) | null = null
+let unlistenBlur: (() => void) | null = null
+
+onMounted(async () => {
+  startRaf()
+  const win = getCurrentWindow()
+  unlistenFocus = await win.listen('tauri://focus', async () => {
+    // Restored from minimize: focus returns. Only resume if we actually paused
+    // for minimize — otherwise this fires on every alt-tab back to the app.
+    if (!rafRunning) {
+      const min = await win.isMinimized()
+      if (!min) startRaf()
+    }
+  })
+  unlistenBlur = await win.listen('tauri://blur', async () => {
+    // Pause only when truly minimized, not on every blur.
+    if (rafRunning) {
+      const min = await win.isMinimized()
+      if (min) stopRaf()
+    }
+  })
 })
 
 onUnmounted(() => {
-  if (raf !== null) cancelAnimationFrame(raf)
+  stopRaf()
+  unlistenFocus?.()
+  unlistenBlur?.()
 })
 </script>
 
