@@ -51,6 +51,27 @@ mkdir -p "$REPO/airplay2dll/vendor"
 cp "$OVERLAY/vendor/alac.c" "$OVERLAY/vendor/alac.h" "$OVERLAY/vendor/dmap_parser.c" "$OVERLAY/vendor/dmap_parser.h" "$REPO/airplay2dll/vendor/"
 
 # ---------- idempotent source patches (applied before compile) ----------
+# Restore every patched file first. The guards below skip a patch whose marker
+# comment is already present, which stops a double-apply but also silently
+# keeps a STALE patch when its content changes and its marker does not — that
+# cost a debugging round: the ALAC dispatch was compiled in and never called,
+# because the tree still held an older version of the SETUP patch. Starting
+# from pristine sources makes the build reproducible instead.
+PATCHED_FILES=(
+  "AirPlayServerLib/lib/byteutils.c"
+  "AirPlayServerLib/lib/raop_handlers.h"
+  "AirPlayServerLib/lib/raop_buffer.c"
+  "AirPlayServerLib/lib/raop_rtp.c"
+  "airplay2dll/src/FgAirplayServer.cpp"
+  "airplay2dll/src/Airplay2Export.cpp"
+)
+if git -C "$UPSTREAM_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+  git -C "$UPSTREAM_DIR" checkout -- "${PATCHED_FILES[@]}"
+  echo "==> restored ${#PATCHED_FILES[@]} upstream files before patching"
+else
+  echo "==> WARNING: $UPSTREAM_DIR is not a git checkout; patches may be stale"
+fi
+
 # 1) MSVC-only compat clock_gettime conflicts with MinGW winpthreads
 if grep -q '#ifdef WIN32' "$REPO/AirPlayServerLib/lib/byteutils.c" 2>/dev/null; then
   sed -i 's/#ifdef WIN32/#if defined(WIN32) \&\& defined(_MSC_VER)/' "$REPO/AirPlayServerLib/lib/byteutils.c"
@@ -95,6 +116,8 @@ if ! grep -q 'overlay: identify the negotiated audio codec' "$HND"; then
 fi
 grep -q 'overlay: identify the negotiated audio codec' "$HND" || {
   echo "  ERROR: could not patch the audio SETUP handler (upstream changed?)"; exit 1; }
+grep -q 'bridge_set_audio_codec((int)ct, (int)spf)' "$HND" || {
+  echo "  ERROR: SETUP patch is present but does not hand over the codec"; exit 1; }
 # 6) hand the decode to the overlay. Upstream decodes exactly one format —
 #    AAC-ELD, from a hardcoded AudioSpecificConfig — so an audio-only session
 #    failed on every frame. The whole decode block becomes one call that
@@ -114,6 +137,8 @@ if ! grep -q 'overlay: decode per the negotiated format' "$BUF"; then
 fi
 grep -q 'overlay: decode per the negotiated format' "$BUF" || {
   echo "  ERROR: could not patch the audio decode block (upstream changed?)"; exit 1; }
+grep -q 'bridge_decode_audio(raop_buffer->phandle' "$BUF" || {
+  echo "  ERROR: decode patch is present but makes no call"; exit 1; }
 if grep -q 'aacDecoder_DecodeFrame(raop_buffer->phandle' "$BUF"; then
   echo "  ERROR: the old AAC decode block survived the patch"; exit 1
 fi
@@ -128,6 +153,8 @@ if ! grep -q 'overlay: report the audio session ending' "$RTP"; then
 fi
 grep -q 'overlay: report the audio session ending' "$RTP" || {
   echo "  ERROR: could not patch raop_rtp_stop (upstream changed?)"; exit 1; }
+grep -q 'bridge_on_audio_stopped();' "$RTP" || {
+  echo "  ERROR: raop_rtp_stop patch is present but makes no call"; exit 1; }
 # 8) surface track metadata. Upstream's audio_set_metadata is an empty function
 #    because IAirServerCallback has no metadata method to forward to, so the
 #    DAAP blob the phone sends over SET_PARAMETER was simply dropped.
@@ -141,6 +168,8 @@ void FgAirplayServer::audio_set_metadata(void* cls, void* session, const void* b
 fi
 grep -q 'overlay: forward DAAP metadata' "$SRV" || {
   echo "  ERROR: could not patch audio_set_metadata (upstream changed?)"; exit 1; }
+grep -q 'bridge_on_metadata(buffer, buflen);' "$SRV" || {
+  echo "  ERROR: metadata patch is present but makes no call"; exit 1; }
 echo "==> upstream patches applied"
 
 # Deliberately no -I external/ffmpeg/include: a stray libav* include should
