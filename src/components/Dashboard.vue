@@ -2,13 +2,14 @@
 import { computed, onMounted, ref } from 'vue'
 import { toast } from 'vue-sonner'
 import { Button } from '@/components/ui/button'
-import { Settings as SettingsIcon, Radio, Square } from 'lucide-vue-next'
+import { Settings as SettingsIcon, Radio, Square, MonitorSmartphone, Music } from 'lucide-vue-next'
 import { useReceiver } from '@/composables/useReceiver'
 import MirrorCanvas from '@/components/MirrorCanvas.vue'
+import AudioVisualizer from '@/components/AudioVisualizer.vue'
 import StatusBar from '@/components/StatusBar.vue'
 import SettingsDialog from '@/components/SettingsDialog.vue'
 
-const { status, start, stop, refresh, saveSettings, ensureListeners } = useReceiver()
+const { status, start, stop, refresh, saveSettings, ensureListeners, viewMode } = useReceiver()
 const settingsOpen = ref(false)
 const starting = ref(false)
 // "开始接收" waits until the backend reports the native library loaded, rather
@@ -68,7 +69,33 @@ async function onSaveSettings(opts: { deviceName: string; port: number; saveDir:
 <template>
   <div class="mx-auto max-w-3xl w-full h-screen flex flex-col px-4 py-3 gap-3 overflow-hidden">
     <div class="flex items-center justify-between shrink-0">
-      <h1 class="text-xl font-bold tracking-tight">AirPlay Mirror</h1>
+      <div class="flex items-center gap-3">
+        <h1 class="text-xl font-bold tracking-tight">AirPlay Mirror</h1>
+        <!-- Which pane to show. Purely a view choice: switching does not touch
+             the receiver, so a running session keeps running either way. -->
+        <div class="flex items-center rounded-md border p-0.5" role="group" aria-label="显示模式">
+          <button
+            type="button"
+            class="flex items-center justify-center h-7 w-8 rounded transition-colors"
+            :class="viewMode === 'mirror' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-muted'"
+            :aria-pressed="viewMode === 'mirror'"
+            title="投屏画面"
+            @click="viewMode = 'mirror'"
+          >
+            <MonitorSmartphone class="h-4 w-4" />
+          </button>
+          <button
+            type="button"
+            class="flex items-center justify-center h-7 w-8 rounded transition-colors"
+            :class="viewMode === 'audio' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-muted'"
+            :aria-pressed="viewMode === 'audio'"
+            title="音频播放"
+            @click="viewMode = 'audio'"
+          >
+            <Music class="h-4 w-4" />
+          </button>
+        </div>
+      </div>
       <div class="flex items-center gap-2">
         <Button v-if="!status.running" size="sm" :disabled="starting || !ready" @click="onStart">
           <Radio class="h-4 w-4" /> {{ !ready ? '初始化中…' : starting ? '启动中…' : '开始接收' }}
@@ -87,7 +114,10 @@ async function onSaveSettings(opts: { deviceName: string; port: number; saveDir:
     </div>
 
     <div class="flex-1 min-h-0">
-      <MirrorCanvas />
+      <div v-show="viewMode === 'mirror'" class="h-full">
+        <MirrorCanvas />
+      </div>
+      <AudioVisualizer v-if="viewMode === 'audio'" />
     </div>
 
     <SettingsDialog

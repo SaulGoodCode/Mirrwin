@@ -48,7 +48,7 @@ cp "$OVERLAY/BridgeTap.h"           "$REPO/airplay2dll/BridgeTap.h"
 cp "$OVERLAY/FgAirplayChannel.h"    "$REPO/airplay2dll/FgAirplayChannel.h"
 cp "$OVERLAY/FgAirplayChannel.cpp"  "$REPO/airplay2dll/FgAirplayChannel.cpp"
 mkdir -p "$REPO/airplay2dll/vendor"
-cp "$OVERLAY/vendor/alac.c" "$OVERLAY/vendor/alac.h" "$REPO/airplay2dll/vendor/"
+cp "$OVERLAY/vendor/alac.c" "$OVERLAY/vendor/alac.h" "$OVERLAY/vendor/dmap_parser.c" "$OVERLAY/vendor/dmap_parser.h" "$REPO/airplay2dll/vendor/"
 
 # ---------- idempotent source patches (applied before compile) ----------
 # 1) MSVC-only compat clock_gettime conflicts with MinGW winpthreads
@@ -117,6 +117,30 @@ grep -q 'overlay: decode per the negotiated format' "$BUF" || {
 if grep -q 'aacDecoder_DecodeFrame(raop_buffer->phandle' "$BUF"; then
   echo "  ERROR: the old AAC decode block survived the patch"; exit 1
 fi
+# 7) tell the overlay when the audio RTP session stops. Patching raop_rtp_stop
+#    itself rather than the TEARDOWN handler covers every route into it,
+#    including conn_destroy when the phone drops the connection outright.
+RTP="$REPO/AirPlayServerLib/lib/raop_rtp.c"
+if ! grep -q 'overlay: report the audio session ending' "$RTP"; then
+  # The return type sits on its own line, so anchor on the signature, step to
+  # the opening brace and land the call inside the body.
+  sed -i '/^raop_rtp_stop(raop_rtp_t \*raop_rtp)$/{n;s|^{$|{\n\t{ extern void bridge_on_audio_stopped(void); bridge_on_audio_stopped(); }  /* overlay: report the audio session ending */|}' "$RTP"
+fi
+grep -q 'overlay: report the audio session ending' "$RTP" || {
+  echo "  ERROR: could not patch raop_rtp_stop (upstream changed?)"; exit 1; }
+# 8) surface track metadata. Upstream's audio_set_metadata is an empty function
+#    because IAirServerCallback has no metadata method to forward to, so the
+#    DAAP blob the phone sends over SET_PARAMETER was simply dropped.
+if ! grep -q 'overlay: forward DAAP metadata' "$SRV"; then
+  sed -i '/^void FgAirplayServer::audio_set_metadata(void\* cls, void\* session, const void\* buffer, int buflen, const char\* remoteName, const char\* remoteDeviceId)$/,/^}$/c\
+extern "C" void bridge_on_metadata(const void*, int);  /* overlay: forward DAAP metadata */\
+void FgAirplayServer::audio_set_metadata(void* cls, void* session, const void* buffer, int buflen, const char* remoteName, const char* remoteDeviceId)\
+{\
+\tbridge_on_metadata(buffer, buflen);\
+}' "$SRV"
+fi
+grep -q 'overlay: forward DAAP metadata' "$SRV" || {
+  echo "  ERROR: could not patch audio_set_metadata (upstream changed?)"; exit 1; }
 echo "==> upstream patches applied"
 
 # Deliberately no -I external/ffmpeg/include: a stray libav* include should
@@ -158,7 +182,7 @@ mkdir -p "$OBJ"
 
 core_srcs=$(grep -o '<ClCompile Include="[^"]*"' "$CORE_VCX" | sed 's/<ClCompile Include="//;s/"//')
 dll_srcs=$(grep -o '<ClCompile Include="[^"]*"' "$DLL_VCX"  | sed 's/<ClCompile Include="//;s/"//')
-dll_srcs="$dll_srcs src/Bridge.cpp src/BridgeAudio.cpp vendor/alac.c"
+dll_srcs="$dll_srcs src/Bridge.cpp src/BridgeAudio.cpp vendor/alac.c vendor/dmap_parser.c"
 
 echo "==> compiling core lib ($(echo "$core_srcs" | wc -w) files)..."
 i=0

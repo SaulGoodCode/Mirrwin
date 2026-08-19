@@ -49,6 +49,8 @@ pub fn read_status(state: &Arc<AppState>) -> ReceiverStatus {
         mirror_lib_present: *state.mirror_lib_present.lock().unwrap(),
         lib_ready: *state.lib_ready.lock().unwrap(),
         enable_audio: *state.enable_audio.lock().unwrap(),
+        audio_playing: *state.audio_playing.lock().unwrap(),
+        track: state.track.lock().unwrap().clone(),
         width: *state.width.lock().unwrap(),
         height: *state.height.lock().unwrap(),
         fps: *state.fps.lock().unwrap(),

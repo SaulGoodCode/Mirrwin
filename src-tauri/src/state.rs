@@ -26,6 +26,11 @@ pub struct AppState {
     pub lib_ready: Mutex<bool>,
     /// Play the device's audio as well as its screen. Off by default.
     pub enable_audio: Mutex<bool>,
+    /// True while the phone is using this machine purely as a speaker (an
+    /// audio-only AirPlay session, no picture).
+    pub audio_playing: Mutex<bool>,
+    /// What the phone says is playing, when it says anything.
+    pub track: Mutex<Option<crate::ffi::TrackInfo>>,
     /// Requested capture size / rate (0 = let the library decide). Kept here so
     /// the settings dialog can show what was last chosen.
     pub width: Mutex<u32>,
@@ -48,6 +53,8 @@ impl Default for AppState {
             mirror_lib_present: Mutex::new(false),
             lib_ready: Mutex::new(false),
             enable_audio: Mutex::new(false),
+            audio_playing: Mutex::new(false),
+            track: Mutex::new(None),
             width: Mutex::new(0),
             height: Mutex::new(0),
             fps: Mutex::new(0),

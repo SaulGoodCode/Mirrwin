@@ -3,6 +3,15 @@
 
 export type MirrorMode = 'demo' | 'real'
 
+/** Which view the user has selected: the picture, or the audio visualiser. */
+export type ViewMode = 'mirror' | 'audio'
+
+/** Track information the phone sends over RTSP while playing. */
+export interface TrackInfo {
+  title: string
+  artist: string
+}
+
 export interface ReceiverStatus {
   /** Whether the receiver is currently running. */
   running: boolean
@@ -26,6 +35,10 @@ export interface ReceiverStatus {
   libReady: boolean
   /** Whether the device's audio is played alongside the picture. */
   enableAudio: boolean
+  /** True while an audio-only session is playing (phone using this as a speaker). */
+  audioPlaying: boolean
+  /** What the phone reports is playing, if anything. */
+  track: TrackInfo | null
   /** Last chosen capture size / rate (0 = let the library decide). */
   width: number
   height: number

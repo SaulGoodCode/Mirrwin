@@ -131,6 +131,18 @@ type MirrorStop = unsafe extern "C" fn();
 
 const EVENT_CONNECTED: i32 = 0;
 const EVENT_DISCONNECTED: i32 = 1;
+const EVENT_AUDIO_START: i32 = 2;
+const EVENT_AUDIO_END: i32 = 3;
+const EVENT_METADATA: i32 = 4;
+const EVENT_VOLUME: i32 = 5;
+
+/// Track information the phone sends over RTSP while playing.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackInfo {
+    pub title: String,
+    pub artist: String,
+}
 
 /// Turn a `mirror_start_av` return code into something the user can act on.
 /// The codes are defined in `tools/airplay-dll/Bridge.cpp`; the two that a user
@@ -245,6 +257,10 @@ fn on_state_inner(event: i32, name: String, id: String) {
     let label = match event {
         EVENT_CONNECTED => "connected",
         EVENT_DISCONNECTED => "disconnected",
+        EVENT_AUDIO_START => "audio started",
+        EVENT_AUDIO_END => "audio ended",
+        EVENT_METADATA => "metadata",
+        EVENT_VOLUME => "volume",
         // Ignore codes this build does not know rather than mistaking one for
         // a disconnect and clearing the picture.
         other => {
@@ -252,7 +268,7 @@ fn on_state_inner(event: i32, name: String, id: String) {
             return;
         }
     };
-    eprintln!("[ffi] state: {label} name='{name}' id='{id}'");
+    eprintln!("[ffi] state: {label} a='{name}' b='{id}'");
 
     // Clone the handle out so no lock is held while emitting.
     let app = match SINK.read() {
@@ -262,19 +278,46 @@ fn on_state_inner(event: i32, name: String, id: String) {
         },
         Err(_) => return,
     };
-
-    let display = if name.is_empty() { id } else { name };
     let state = app.state::<Arc<AppState>>().inner().clone();
 
-    if event == EVENT_CONNECTED {
-        *state.connected_device.lock().unwrap() = Some(display.clone());
-        let _ = app.emit("device_connected", display);
-    } else {
-        STREAM_BYTES.store(0, std::sync::atomic::Ordering::Relaxed);
-        *state.connected_device.lock().unwrap() = None;
-        // The frontend keeps the last picture up until this fires — it is the
-        // authoritative "stopped mirroring" edge, not a guess from idle time.
-        let _ = app.emit("video_ended", ());
+    match event {
+        EVENT_CONNECTED => {
+            let display = if name.is_empty() { id } else { name };
+            *state.connected_device.lock().unwrap() = Some(display.clone());
+            let _ = app.emit("device_connected", display);
+        }
+        EVENT_DISCONNECTED => {
+            STREAM_BYTES.store(0, std::sync::atomic::Ordering::Relaxed);
+            *state.connected_device.lock().unwrap() = None;
+            // The frontend keeps the last picture up until this fires — it is
+            // the authoritative "stopped mirroring" edge, not a guess from
+            // idle time.
+            let _ = app.emit("video_ended", ());
+        }
+        // An audio-only session: the phone is using this machine as a speaker,
+        // so there is no picture coming and the UI shows its audio view.
+        EVENT_AUDIO_START => {
+            *state.audio_playing.lock().unwrap() = true;
+            let _ = app.emit("audio_started", ());
+        }
+        EVENT_AUDIO_END => {
+            *state.audio_playing.lock().unwrap() = false;
+            *state.track.lock().unwrap() = None;
+            let _ = app.emit("audio_ended", ());
+        }
+        EVENT_METADATA => {
+            let track = TrackInfo { title: name, artist: id };
+            *state.track.lock().unwrap() = Some(track.clone());
+            let _ = app.emit("track_metadata", track);
+        }
+        EVENT_VOLUME => {
+            // AirPlay sends dB, 0 = full and -144 = mute; anything else is the
+            // phone's slider position.
+            if let Ok(db) = name.parse::<f32>() {
+                let _ = app.emit("volume", db);
+            }
+        }
+        _ => unreachable!("event codes are filtered above"),
     }
     crate::commands::emit_status(&app, &state);
 }

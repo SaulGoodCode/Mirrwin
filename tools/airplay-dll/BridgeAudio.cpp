@@ -21,12 +21,14 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <string>
 #include <mutex>
 
 #include "BridgeTap.h"
 
 extern "C" {
 #include "vendor/alac.h"
+#include "vendor/dmap_parser.h"
 }
 
 // fdk-aac, for the mirroring path this file also has to keep working.
@@ -90,6 +92,23 @@ extern "C" void bridge_set_audio_codec(int ct, int spf) {
         alac_release_locked();
         bridge_log("audio: using the AAC-ELD path (ct=%d spf=%d)", ct, spf);
     }
+    // An audio SETUP *is* the start of an audio session, so the host learns
+    // about it here rather than needing another patch upstream.
+    bridge_on_state_text(BRIDGE_EVENT_AUDIO_START, "", "");
+}
+
+extern "C" void bridge_on_audio_stopped(void) {
+    {
+        std::lock_guard<std::mutex> guard(g_audio_mutex);
+        if (!g_ct && !g_spf) {
+            return;  // no session was running; nothing to report
+        }
+        alac_release_locked();
+        g_ct = 0;
+        g_spf = 0;
+    }
+    bridge_log("audio: session stopped");
+    bridge_on_state_text(BRIDGE_EVENT_AUDIO_END, "", "");
 }
 
 extern "C" void bridge_reset_audio_codec(void) {
@@ -157,4 +176,62 @@ extern "C" int bridge_decode_audio(void* aac_handle, const unsigned char* in, in
     if (channels) *channels = (unsigned short)info->numChannels;
     if (bits_per_sample) *bits_per_sample = 16;
     return info->frameSize * info->numChannels * (int)sizeof(INT_PCM);
+}
+
+// ── track metadata ───────────────────────────────────────────────────────
+// The phone sends DAAP over RTSP SET_PARAMETER while playing. Upstream's
+// FgAirplayServer::audio_set_metadata is an empty function because
+// IAirServerCallback has no metadata method to forward to, so the build script
+// patches it to land here instead.
+
+namespace {
+
+struct MetaFields {
+    std::string title;
+    std::string artist;
+    std::string album;
+};
+
+void on_dmap_string(void* ctx, const char* code, const char* /*name*/, const char* buf,
+                    size_t len) {
+    if (!ctx || !code || !buf || len == 0) {
+        return;
+    }
+    MetaFields* out = static_cast<MetaFields*>(ctx);
+    std::string value(buf, len);
+    // DAAP content codes: item name, artist, album.
+    if (strcmp(code, "minm") == 0) {
+        out->title = value;
+    } else if (strcmp(code, "asar") == 0) {
+        out->artist = value;
+    } else if (strcmp(code, "asal") == 0) {
+        out->album = value;
+    }
+}
+
+}  // namespace
+
+extern "C" void bridge_on_metadata(const void* buffer, int len) {
+    if (!buffer || len <= 0) {
+        return;
+    }
+    MetaFields fields;
+    dmap_settings settings;
+    memset(&settings, 0, sizeof(settings));
+    settings.on_string = on_dmap_string;
+    settings.ctx = &fields;
+
+    if (dmap_parse(&settings, (const char*)buffer, (size_t)len) != 0) {
+        bridge_log("audio: could not parse %d bytes of DAAP metadata", len);
+        return;
+    }
+    if (fields.title.empty() && fields.artist.empty() && fields.album.empty()) {
+        return;
+    }
+    bridge_log("audio: now playing '%s' by '%s' (%s)", fields.title.c_str(),
+               fields.artist.c_str(), fields.album.c_str());
+
+    // Album rides along with the artist: state_cb carries two strings, and
+    // splitting on a delimiter would break on a title that contains it.
+    bridge_on_state_text(BRIDGE_EVENT_METADATA, fields.title.c_str(), fields.artist.c_str());
 }

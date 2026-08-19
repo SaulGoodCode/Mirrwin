@@ -1,7 +1,7 @@
 import { ref } from 'vue'
 import { invoke, Channel } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
-import type { ReceiverStatus, StartOptions } from '@/types'
+import type { ReceiverStatus, StartOptions, TrackInfo, ViewMode } from '@/types'
 import { PcmPlayer } from '@/lib/pcmPlayer'
 
 // Reactive app state shared across components.
@@ -17,6 +17,8 @@ const status = ref<ReceiverStatus>({
   mirrorLibPresent: false,
   libReady: false,
   enableAudio: false,
+  audioPlaying: false,
+  track: null,
   width: 0,
   height: 0,
   fps: 0,
@@ -26,6 +28,11 @@ const logs = ref<string[]>([])
 // from `status.running` (receiver started but iPhone maybe not mirroring yet).
 // Shared so the top status bar and the canvas stay in sync.
 const mirroring = ref(false)
+// Which pane the user is looking at. Independent of what the phone is doing:
+// switching to 音频 while mirroring should not tear the session down.
+const viewMode = ref<ViewMode>('mirror')
+// Volume the phone last reported, in dB (0 = full, -144 = mute), or null.
+const volumeDb = ref<number | null>(null)
 
 // Subscribers receive each raw H.264 (Annex-B) chunk as it arrives from the
 // backend. A Set (not a reactive ref) so no chunk is coalesced away — every
@@ -61,6 +68,32 @@ async function ensureListeners() {
   unlisteners.push(
     await listen('video_ended', () => {
       mirroring.value = false
+    }),
+  )
+  // An audio-only session: the phone is using this machine as a speaker, so
+  // there is no picture coming. Switch the view for the user rather than
+  // leaving them on an empty canvas wondering whether it worked.
+  unlisteners.push(
+    await listen('audio_started', () => {
+      status.value = { ...status.value, audioPlaying: true }
+      viewMode.value = 'audio'
+    }),
+  )
+  unlisteners.push(
+    await listen('audio_ended', () => {
+      status.value = { ...status.value, audioPlaying: false, track: null }
+      audioPlayer?.stop()
+      audioPlayer = null
+    }),
+  )
+  unlisteners.push(
+    await listen<TrackInfo>('track_metadata', (e) => {
+      status.value = { ...status.value, track: e.payload }
+    }),
+  )
+  unlisteners.push(
+    await listen<number>('volume', (e) => {
+      volumeDb.value = e.payload
     }),
   )
   listenersReady = true
@@ -131,10 +164,18 @@ export function useReceiver() {
     status.value = await invoke<ReceiverStatus>('update_settings', { options: opts })
   }
 
+  /** Live frequency data for the visualiser, or null when nothing is playing. */
+  function getAudioAnalyser(): AnalyserNode | null {
+    return audioPlayer?.getAnalyser() ?? null
+  }
+
   return {
     status,
     logs,
     mirroring,
+    viewMode,
+    volumeDb,
+    getAudioAnalyser,
     refresh,
     start,
     stop,

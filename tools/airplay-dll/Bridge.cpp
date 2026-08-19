@@ -62,9 +62,6 @@ typedef struct mirror_cfg {
 }
 #endif
 
-#define BRIDGE_EVENT_CONNECTED    0
-#define BRIDGE_EVENT_DISCONNECTED 1
-
 // Return codes for mirror_start_av. The host turns these into messages, so a
 // failure that a user can act on gets its own code rather than a generic one.
 #define MIRROR_OK              0
@@ -190,7 +187,7 @@ void bridge_on_h264(const unsigned char* data, int len, int is_codec_config) {
     }
 }
 
-static void bridge_on_state(int event, const char* name, const char* id) {
+void bridge_on_state_text(int event, const char* name, const char* id) {
     state_cb cb = g_state_cb.load(std::memory_order_acquire);
     if (cb) {
         cb(event, name ? name : "", id ? id : "");
@@ -207,12 +204,12 @@ public:
     void connected(const char* remoteName, const char* remoteDeviceId) override {
         bridge_log("connected: name=%s id=%s", remoteName ? remoteName : "(null)",
              remoteDeviceId ? remoteDeviceId : "(null)");
-        bridge_on_state(BRIDGE_EVENT_CONNECTED, remoteName, remoteDeviceId);
+        bridge_on_state_text(BRIDGE_EVENT_CONNECTED, remoteName, remoteDeviceId);
     }
     void disconnected(const char* remoteName, const char* remoteDeviceId) override {
         bridge_log("disconnected: name=%s id=%s", remoteName ? remoteName : "(null)",
              remoteDeviceId ? remoteDeviceId : "(null)");
-        bridge_on_state(BRIDGE_EVENT_DISCONNECTED, remoteName, remoteDeviceId);
+        bridge_on_state_text(BRIDGE_EVENT_DISCONNECTED, remoteName, remoteDeviceId);
     }
     void outputAudio(SFgAudioFrame* f, const char*, const char*) override {
         audio_cb cb = g_audio_cb.load(std::memory_order_acquire);
@@ -224,7 +221,13 @@ public:
     void outputVideo(SFgVideoFrame*, const char*, const char*) override {}
     void videoPlay(char*, double, double) override {}
     void videoGetPlayInfo(double*, double*, double*) override {}
-    void setVolume(float, const char*, const char*) override {}
+    void setVolume(float volume, const char*, const char*) override {
+        // AirPlay volume is dB: 0 = full, -144 = mute. Passed on as text so it
+        // rides the existing state callback instead of needing a new export.
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%.4f", volume);
+        bridge_on_state_text(BRIDGE_EVENT_VOLUME, buf, "");
+    }
     bool requestPinApproval(const char*, const char*) override { return true; }
     // AirPlayServerLib logs its whole RTSP/RTP/decoder trace through here at
     // debug level. It costs nothing while AIRPLAY_BRIDGE_LOG is unset, and when

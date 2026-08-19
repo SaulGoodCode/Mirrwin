@@ -112,12 +112,23 @@ function toFloat32(bytes: Uint8Array): Float32Array {
 export class PcmPlayer {
   private ctx: AudioContext | null = null
   private node: AudioWorkletNode | null = null
+  private analyser: AnalyserNode | null = null
   private setup: Promise<void> | null = null
   private format: PcmFormat | null = null
   private warned = false
 
   static isSupported(): boolean {
     return typeof AudioContext !== 'undefined' && typeof AudioWorkletNode !== 'undefined'
+  }
+
+  /**
+   * Frequency data for the visualiser, or null before playback starts.
+   *
+   * Taken from a node in the live graph rather than from the packets, so what
+   * is drawn is what is actually being heard.
+   */
+  getAnalyser(): AnalyserNode | null {
+    return this.analyser
   }
 
   /** Feed one chunk exactly as it arrived from the backend channel. */
@@ -178,6 +189,14 @@ export class PcmPlayer {
     node.connect(ctx.destination)
     this.node = node
 
+    // Tapped in parallel rather than in series: the visualiser reads from it,
+    // but audio still reaches the speakers if anything here goes wrong.
+    const analyser = ctx.createAnalyser()
+    analyser.fftSize = 512
+    analyser.smoothingTimeConstant = 0.75
+    node.connect(analyser)
+    this.analyser = analyser
+
     // Chromium starts a context suspended until the page has been interacted
     // with. Starting the receiver is a click, so this normally just resolves.
     if (ctx.state === 'suspended') {
@@ -193,6 +212,8 @@ export class PcmPlayer {
     this.node?.port.postMessage('flush')
     this.node?.disconnect()
     this.node = null
+    this.analyser?.disconnect()
+    this.analyser = null
     const ctx = this.ctx
     this.ctx = null
     this.setup = null

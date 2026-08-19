@@ -22,6 +22,10 @@ pub struct ReceiverStatus {
     /// Whether the device's audio is played alongside the picture. Off by
     /// default: mirroring is useful without it and it costs extra traffic.
     pub enable_audio: bool,
+    /// True while an audio-only session is playing (no picture).
+    pub audio_playing: bool,
+    /// What the phone reports is playing, if anything.
+    pub track: Option<crate::ffi::TrackInfo>,
     /// Last chosen capture size / rate (0 = let the library decide).
     pub width: u32,
     pub height: u32,
