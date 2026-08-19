@@ -170,6 +170,19 @@ grep -q 'overlay: forward DAAP metadata' "$SRV" || {
   echo "  ERROR: could not patch audio_set_metadata (upstream changed?)"; exit 1; }
 grep -q 'bridge_on_metadata(buffer, buflen);' "$SRV" || {
   echo "  ERROR: metadata patch is present but makes no call"; exit 1; }
+# 9) same for album artwork, which upstream also drops into an empty function.
+if ! grep -q 'overlay: forward cover art' "$SRV"; then
+  sed -i '/^void FgAirplayServer::audio_set_coverart(void\* cls, void\* session, const void\* buffer, int buflen, const char\* remoteName, const char\* remoteDeviceId)$/,/^}$/c\
+extern "C" void bridge_on_coverart(const void*, int);  /* overlay: forward cover art */\
+void FgAirplayServer::audio_set_coverart(void* cls, void* session, const void* buffer, int buflen, const char* remoteName, const char* remoteDeviceId)\
+{\
+\tbridge_on_coverart(buffer, buflen);\
+}' "$SRV"
+fi
+grep -q 'overlay: forward cover art' "$SRV" || {
+  echo "  ERROR: could not patch audio_set_coverart (upstream changed?)"; exit 1; }
+grep -q 'bridge_on_coverart(buffer, buflen);' "$SRV" || {
+  echo "  ERROR: cover art patch is present but makes no call"; exit 1; }
 echo "==> upstream patches applied"
 
 # Deliberately no -I external/ffmpeg/include: a stray libav* include should
@@ -253,7 +266,7 @@ echo "==> built: $OUT/airplay2dll.dll"
 ls -la "$OUT/airplay2dll.dll"
 
 echo "==> exports:"
-objdump -p "$OUT/airplay2dll.dll" | grep -iE "mirror_start_av|mirror_stop" || {
+objdump -p "$OUT/airplay2dll.dll" | grep -iE "mirror_start_av|mirror_stop|mirror_set_art_cb" || {
   echo "  ERROR: expected exports missing"; exit 1; }
 
 echo "==> imports:"

@@ -11,7 +11,7 @@ import { Music } from 'lucide-vue-next'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { useReceiver } from '@/composables/useReceiver'
 
-const { status, getAudioAnalyser, volumeDb } = useReceiver()
+const { status, getAudioAnalyser, volumeDb, artwork } = useReceiver()
 
 const canvasRef = ref<HTMLCanvasElement | null>(null)
 let raf: number | null = null
@@ -139,8 +139,16 @@ onUnmounted(() => {
       class="flex-1 min-h-0 rounded-xl bg-gradient-to-b from-slate-900 to-slate-800 flex flex-col items-center justify-center gap-6 px-6 py-8 overflow-hidden"
     >
       <div class="flex flex-col items-center gap-2 text-center shrink-0">
-        <div class="h-16 w-16 rounded-full bg-white/10 flex items-center justify-center">
-          <Music class="h-8 w-8 text-indigo-300" />
+        <div
+          class="h-32 w-32 rounded-xl overflow-hidden bg-white/10 flex items-center justify-center shadow-lg shadow-black/40"
+        >
+          <img
+            v-if="artwork"
+            :src="artwork"
+            alt="专辑封面"
+            class="h-full w-full object-cover"
+          />
+          <Music v-else class="h-10 w-10 text-indigo-300" />
         </div>
         <template v-if="hasTrack">
           <p class="text-lg font-semibold text-white truncate max-w-full">

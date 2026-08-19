@@ -37,6 +37,13 @@ void bridge_on_audio_stopped(void);
 /// Parse a DAAP metadata blob from SET_PARAMETER and raise it to the host.
 void bridge_on_metadata(const void* buffer, int len);
 
+/// Hand the host the album artwork the phone sent (JPEG or PNG bytes).
+void bridge_on_coverart(const void* buffer, int len);
+
+/// Deliver artwork bytes to whatever the host registered. Implemented in
+/// Bridge.cpp, which owns the host callbacks.
+void bridge_emit_artwork(const unsigned char* data, int len);
+
 /// Drop any decoder built for the previous session.
 void bridge_reset_audio_codec(void);
 

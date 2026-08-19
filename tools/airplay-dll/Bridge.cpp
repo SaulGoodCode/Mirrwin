@@ -48,6 +48,12 @@ typedef void (*state_cb)(int event, const char* remote_name, const char* device_
 typedef void (*audio_cb)(const uint8_t* pcm, int len, int sample_rate, int channels,
                          int bits_per_sample);
 
+// Album artwork as the phone sent it — JPEG in practice. Registered separately
+// from mirror_start_av so adding it needs no change to that signature: a host
+// that wants artwork looks the setter up and fails loudly if the DLL predates
+// it, which a fourth parameter could not have done.
+typedef void (*art_cb)(const uint8_t* data, int len);
+
 typedef struct mirror_cfg {
     const char* server_name;
     unsigned int raop_port;
@@ -179,11 +185,19 @@ void bridge_log(const char* fmt, ...) {
 static std::atomic<video_cb> g_video_cb{nullptr};
 static std::atomic<state_cb> g_state_cb{nullptr};
 static std::atomic<audio_cb> g_audio_cb{nullptr};
+static std::atomic<art_cb> g_art_cb{nullptr};
 
 void bridge_on_h264(const unsigned char* data, int len, int is_codec_config) {
     video_cb cb = g_video_cb.load(std::memory_order_acquire);
     if (cb && data && len > 0) {
         cb((const uint8_t*)data, len, is_codec_config ? 0 : 1);
+    }
+}
+
+void bridge_emit_artwork(const unsigned char* data, int len) {
+    art_cb cb = g_art_cb.load(std::memory_order_acquire);
+    if (cb && data && len > 0) {
+        cb((const uint8_t*)data, len);
     }
 }
 
@@ -303,6 +317,13 @@ AIRPLAYSERVER_API int mirror_start_av(const mirror_cfg* cfg, video_cb vcb, state
     return MIRROR_OK;
 }
 
+// Optional: register before or after mirror_start_av, whenever the host wants
+// artwork. Null clears it.
+AIRPLAYSERVER_API void mirror_set_art_cb(art_cb cb) {
+    g_art_cb.store(cb, std::memory_order_release);
+    bridge_log("artwork callback %s", cb ? "registered" : "cleared");
+}
+
 AIRPLAYSERVER_API void mirror_stop(void) {
     bridge_log("mirror_stop");
     // Stop delivering to the host first: past this point the host may free
@@ -310,6 +331,7 @@ AIRPLAYSERVER_API void mirror_stop(void) {
     g_video_cb.store(nullptr, std::memory_order_release);
     g_state_cb.store(nullptr, std::memory_order_release);
     g_audio_cb.store(nullptr, std::memory_order_release);
+    g_art_cb.store(nullptr, std::memory_order_release);
     // The next session negotiates its own format; do not carry a decoder over.
     bridge_reset_audio_codec();
 

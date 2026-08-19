@@ -235,3 +235,18 @@ extern "C" void bridge_on_metadata(const void* buffer, int len) {
     // splitting on a delimiter would break on a title that contains it.
     bridge_on_state_text(BRIDGE_EVENT_METADATA, fields.title.c_str(), fields.artist.c_str());
 }
+
+/// Album artwork from SET_PARAMETER. Upstream's audio_set_coverart is another
+/// empty function; the build script patches it to land here. The bytes are the
+/// image exactly as the phone sent it (JPEG in practice) and are only valid for
+/// the duration of the call.
+extern "C" void bridge_on_coverart(const void* buffer, int len) {
+    if (!buffer || len <= 0) {
+        // A track with no artwork sends an empty payload rather than nothing,
+        // which is the signal to drop whatever cover is on screen.
+        bridge_emit_artwork(nullptr, 0);
+        return;
+    }
+    bridge_log("audio: cover art, %d bytes", len);
+    bridge_emit_artwork((const unsigned char*)buffer, len);
+}

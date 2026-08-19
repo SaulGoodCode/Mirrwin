@@ -33,6 +33,9 @@ const mirroring = ref(false)
 const viewMode = ref<ViewMode>('mirror')
 // Volume the phone last reported, in dB (0 = full, -144 = mute), or null.
 const volumeDb = ref<number | null>(null)
+// Album art as a data URL, or empty when the track has none. Kept out of
+// ReceiverStatus so a ~200 KB string is not copied on every status update.
+const artwork = ref('')
 
 // Subscribers receive each raw H.264 (Annex-B) chunk as it arrives from the
 // backend. A Set (not a reactive ref) so no chunk is coalesced away — every
@@ -82,6 +85,7 @@ async function ensureListeners() {
   unlisteners.push(
     await listen('audio_ended', () => {
       status.value = { ...status.value, audioPlaying: false, track: null }
+      artwork.value = ''
       audioPlayer?.stop()
       audioPlayer = null
     }),
@@ -94,6 +98,11 @@ async function ensureListeners() {
   unlisteners.push(
     await listen<number>('volume', (e) => {
       volumeDb.value = e.payload
+    }),
+  )
+  unlisteners.push(
+    await listen<string>('track_artwork', (e) => {
+      artwork.value = e.payload
     }),
   )
   listenersReady = true
@@ -175,6 +184,7 @@ export function useReceiver() {
     mirroring,
     viewMode,
     volumeDb,
+    artwork,
     getAudioAnalyser,
     refresh,
     start,

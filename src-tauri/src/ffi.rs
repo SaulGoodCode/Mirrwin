@@ -37,6 +37,8 @@
 use std::ffi::{c_char, CStr, CString};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine;
 use libloading::{Library, Symbol};
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Emitter, Manager};
@@ -109,6 +111,7 @@ fn load_dll(dll_path: &str) -> Result<&'static Library, String> {
 type VideoCb = unsafe extern "C" fn(*const u8, i32, i32);
 type StateCb = unsafe extern "C" fn(i32, *const c_char, *const c_char);
 type AudioCb = unsafe extern "C" fn(*const u8, i32, i32, i32, i32);
+type ArtCb = unsafe extern "C" fn(*const u8, i32);
 
 /// Byte-for-byte match of `Bridge.cpp`'s `struct mirror_cfg`.
 #[repr(C)]
@@ -128,6 +131,9 @@ struct MirrorCfg {
 type MirrorStartAv =
     unsafe extern "C" fn(*const MirrorCfg, VideoCb, StateCb, Option<AudioCb>) -> i32;
 type MirrorStop = unsafe extern "C" fn();
+/// Registered separately from mirror_start_av, so a DLL without artwork
+/// support is a missing symbol rather than a silently ignored argument.
+type MirrorSetArtCb = unsafe extern "C" fn(Option<ArtCb>);
 
 const EVENT_CONNECTED: i32 = 0;
 const EVENT_DISCONNECTED: i32 = 1;
@@ -240,6 +246,38 @@ unsafe extern "C" fn on_audio(
                 let _ = audio.send(msg);
             }
         }
+    });
+}
+
+/// Called by the DLL with the album artwork the phone sent, on its network
+/// thread. An empty payload means the current track has no cover.
+///
+/// This is base64'd into an event rather than pushed down a binary channel:
+/// it arrives once per track, not per packet, so the simpler path costs
+/// nothing measurable and needs no extra channel plumbing.
+unsafe extern "C" fn on_artwork(data: *const u8, len: i32) {
+    let bytes = if data.is_null() || len <= 0 {
+        Vec::new()
+    } else {
+        std::slice::from_raw_parts(data, len as usize).to_vec()
+    };
+    guard_callback(move || {
+        let app = match SINK.read() {
+            Ok(guard) => match guard.as_ref() {
+                Some(sink) => sink.app.clone(),
+                None => return,
+            },
+            Err(_) => return,
+        };
+        let payload = if bytes.is_empty() {
+            String::new()
+        } else {
+            // A data URL so the frontend can drop it straight into <img>.
+            // JPEG is what phones send; the browser sniffs the real type
+            // anyway, so a wrong guess here is not fatal.
+            format!("data:image/jpeg;base64,{}", B64.encode(&bytes))
+        };
+        let _ = app.emit("track_artwork", payload);
     });
 }
 
@@ -416,6 +454,13 @@ pub fn start_mirror(
     if rc != 0 {
         clear_sink();
         return Err(describe_start_error(rc, port));
+    }
+
+    // Optional extra: an older DLL simply has no artwork, which is worth a
+    // line in the log but must not fail an otherwise working session.
+    match unsafe { lib.get::<MirrorSetArtCb>(b"mirror_set_art_cb ") } {
+        Ok(set_art) => unsafe { set_art(Some(on_artwork)) },
+        Err(_) => eprintln!("[ffi] DLL has no mirror_set_art_cb; album art unavailable"),
     }
 
     *SERVER_NAME.lock().unwrap() = Some(c_name);
