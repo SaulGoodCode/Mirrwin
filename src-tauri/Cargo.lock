@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "airplay-mirror"
-version = "0.1.0"
+version = "1.2.1"
 dependencies = [
  "base64 0.22.1",
  "libloading 0.8.9",
