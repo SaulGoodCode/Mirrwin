@@ -151,7 +151,7 @@ static FILE* g_logf = nullptr;
 static std::once_flag g_log_once;
 static std::mutex g_log_mutex;
 
-static void blog(const char* fmt, ...) {
+void bridge_log(const char* fmt, ...) {
     std::call_once(g_log_once, []() {
         const char* path = getenv("AIRPLAY_BRIDGE_LOG");
         if (path && *path) {
@@ -205,12 +205,12 @@ static void bridge_on_state(int event, const char* name, const char* id) {
 class BridgeCallback : public IAirServerCallback {
 public:
     void connected(const char* remoteName, const char* remoteDeviceId) override {
-        blog("connected: name=%s id=%s", remoteName ? remoteName : "(null)",
+        bridge_log("connected: name=%s id=%s", remoteName ? remoteName : "(null)",
              remoteDeviceId ? remoteDeviceId : "(null)");
         bridge_on_state(BRIDGE_EVENT_CONNECTED, remoteName, remoteDeviceId);
     }
     void disconnected(const char* remoteName, const char* remoteDeviceId) override {
-        blog("disconnected: name=%s id=%s", remoteName ? remoteName : "(null)",
+        bridge_log("disconnected: name=%s id=%s", remoteName ? remoteName : "(null)",
              remoteDeviceId ? remoteDeviceId : "(null)");
         bridge_on_state(BRIDGE_EVENT_DISCONNECTED, remoteName, remoteDeviceId);
     }
@@ -226,7 +226,15 @@ public:
     void videoGetPlayInfo(double*, double*, double*) override {}
     void setVolume(float, const char*, const char*) override {}
     bool requestPinApproval(const char*, const char*) override { return true; }
-    void log(int, const char*) override {}
+    // AirPlayServerLib logs its whole RTSP/RTP/decoder trace through here at
+    // debug level. It costs nothing while AIRPLAY_BRIDGE_LOG is unset, and when
+    // it is set it is the only view into what a phone actually negotiated —
+    // which is how the ALAC requirement was found in the first place.
+    void log(int level, const char* msg) override {
+        if (msg) {
+            bridge_log("[lib:%d] %s", level, msg);
+        }
+    }
 };
 
 static BridgeCallback* g_cb = nullptr;
@@ -243,11 +251,11 @@ extern "C" {
 AIRPLAYSERVER_API int mirror_start_av(const mirror_cfg* cfg, video_cb vcb, state_cb scb,
                                       audio_cb acb) {
     if (!cfg) {
-        blog("mirror_start_av: null cfg");
+        bridge_log("mirror_start_av: null cfg");
         return MIRROR_ERR_ARGS;
     }
     if (g_handle) {
-        blog("mirror_start_av: already running");
+        bridge_log("mirror_start_av: already running");
         return MIRROR_ALREADY_RUNNING;
     }
 
@@ -257,15 +265,15 @@ AIRPLAYSERVER_API int mirror_start_av(const mirror_cfg* cfg, video_cb vcb, state
         airplay_port = 7000;
         raop_port = 6999;
     }
-    blog("mirror_start_av: name=%s raop=%u airplay=%u",
+    bridge_log("mirror_start_av: name=%s raop=%u airplay=%u",
          cfg->server_name ? cfg->server_name : "(null)", raop_port, airplay_port);
 
     if (!bonjour_available()) {
-        blog("mirror_start_av: dnssd.dll (Bonjour) missing or incomplete");
+        bridge_log("mirror_start_av: dnssd.dll (Bonjour) missing or incomplete");
         return MIRROR_ERR_NO_BONJOUR;
     }
     if (!port_free((unsigned short)airplay_port) || !port_free((unsigned short)raop_port)) {
-        blog("mirror_start_av: port %u or %u already in use", airplay_port, raop_port);
+        bridge_log("mirror_start_av: port %u or %u already in use", airplay_port, raop_port);
         return MIRROR_ERR_PORT_BUSY;
     }
 
@@ -273,14 +281,14 @@ AIRPLAYSERVER_API int mirror_start_av(const mirror_cfg* cfg, video_cb vcb, state
     g_video_cb.store(vcb, std::memory_order_release);
     g_state_cb.store(scb, std::memory_order_release);
     g_audio_cb.store(acb, std::memory_order_release);
-    blog("mirror_start_av: audio %s", acb ? "enabled" : "disabled");
+    bridge_log("mirror_start_av: audio %s", acb ? "enabled" : "disabled");
 
     g_cb = new BridgeCallback();
     g_handle = fgServerStart(cfg->server_name, raop_port, airplay_port, g_cb, cfg->password);
     if (!g_handle) {
         // Reached when the stack itself failed — Bonjour present but its
         // service not running, a socket refused by policy, and so on.
-        blog("mirror_start_av: fgServerStart failed");
+        bridge_log("mirror_start_av: fgServerStart failed");
         g_video_cb.store(nullptr, std::memory_order_release);
         g_state_cb.store(nullptr, std::memory_order_release);
         g_audio_cb.store(nullptr, std::memory_order_release);
@@ -288,17 +296,19 @@ AIRPLAYSERVER_API int mirror_start_av(const mirror_cfg* cfg, video_cb vcb, state
         g_cb = nullptr;
         return MIRROR_ERR_START;
     }
-    blog("mirror_start_av: started");
+    bridge_log("mirror_start_av: started");
     return MIRROR_OK;
 }
 
 AIRPLAYSERVER_API void mirror_stop(void) {
-    blog("mirror_stop");
+    bridge_log("mirror_stop");
     // Stop delivering to the host first: past this point the host may free
     // whatever the callbacks write into.
     g_video_cb.store(nullptr, std::memory_order_release);
     g_state_cb.store(nullptr, std::memory_order_release);
     g_audio_cb.store(nullptr, std::memory_order_release);
+    // The next session negotiates its own format; do not carry a decoder over.
+    bridge_reset_audio_codec();
 
     if (g_handle) {
         fgServerStop(g_handle);
@@ -308,7 +318,7 @@ AIRPLAYSERVER_API void mirror_stop(void) {
         delete g_cb;
         g_cb = nullptr;
     }
-    blog("mirror_stop done");
+    bridge_log("mirror_stop done");
 }
 
 } // extern "C"

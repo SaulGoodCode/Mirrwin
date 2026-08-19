@@ -43,9 +43,12 @@ echo "==> gcc:      $(gcc --version | head -1)"
 
 # ---------- overlay ----------
 cp "$OVERLAY/Bridge.cpp"            "$REPO/airplay2dll/src/Bridge.cpp"
+cp "$OVERLAY/BridgeAudio.cpp"       "$REPO/airplay2dll/src/BridgeAudio.cpp"
 cp "$OVERLAY/BridgeTap.h"           "$REPO/airplay2dll/BridgeTap.h"
 cp "$OVERLAY/FgAirplayChannel.h"    "$REPO/airplay2dll/FgAirplayChannel.h"
 cp "$OVERLAY/FgAirplayChannel.cpp"  "$REPO/airplay2dll/FgAirplayChannel.cpp"
+mkdir -p "$REPO/airplay2dll/vendor"
+cp "$OVERLAY/vendor/alac.c" "$OVERLAY/vendor/alac.h" "$REPO/airplay2dll/vendor/"
 
 # ---------- idempotent source patches (applied before compile) ----------
 # 1) MSVC-only compat clock_gettime conflicts with MinGW winpthreads
@@ -82,7 +85,39 @@ grep -q 'overlay: do not hand back a dead server' "$EXP" || {
   echo "  ERROR: could not patch fgServerStartWithDisplay (upstream changed?)"; exit 1; }
 grep -q 'int rc = pServer->start' "$EXP" || {
   echo "  ERROR: fgServerStartWithDisplay patch is half-applied"; exit 1; }
-echo "==> upstream startup-failure patches applied"
+# 5) tell the overlay which audio format SETUP negotiated, and log it. Upstream
+#    reads `audioFormat` only to recognise an audio stream and never looks at
+#    its value, so nothing downstream knows whether the phone is sending ALAC
+#    (audio-only, ct=2 spf=352) or AAC-ELD (screen mirroring).
+HND="$REPO/AirPlayServerLib/lib/raop_handlers.h"
+if ! grep -q 'overlay: identify the negotiated audio codec' "$HND"; then
+  sed -i 's|^        logger_log(conn->raop->logger, LOGGER_DEBUG, "SETUP 3 (audio, type=%llu)", stream_type);$|&\n        { uint64_t af = 0, ct = 0, spf = 0; plist_t n; extern void bridge_set_audio_codec(int, int); if (audio_format_note) plist_get_uint_val(audio_format_note, \&af); if ((n = plist_dict_get_item(stream_note, "ct"))) plist_get_uint_val(n, \&ct); if ((n = plist_dict_get_item(stream_note, "spf"))) plist_get_uint_val(n, \&spf); logger_log(conn->raop->logger, LOGGER_INFO, "AUDIO SETUP negotiated: audioFormat=%llu ct=%llu spf=%llu", af, ct, spf); bridge_set_audio_codec((int)ct, (int)spf); }  /* overlay: identify the negotiated audio codec */|' "$HND"
+fi
+grep -q 'overlay: identify the negotiated audio codec' "$HND" || {
+  echo "  ERROR: could not patch the audio SETUP handler (upstream changed?)"; exit 1; }
+# 6) hand the decode to the overlay. Upstream decodes exactly one format —
+#    AAC-ELD, from a hardcoded AudioSpecificConfig — so an audio-only session
+#    failed on every frame. The whole decode block becomes one call that
+#    dispatches on what SETUP agreed. The range ends on the DUMP_AUDIO guard
+#    that follows the block, which is re-emitted at the end of the replacement.
+BUF="$REPO/AirPlayServerLib/lib/raop_buffer.c"
+if ! grep -q 'overlay: decode per the negotiated format' "$BUF"; then
+  sed -i '/^\t\/\/ aac decode to pcm$/,/^#ifdef DUMP_AUDIO$/c\
+\t/* overlay: decode per the negotiated format (ALAC or AAC-ELD) */\
+\textern int bridge_decode_audio(void*, const unsigned char*, int, void*, int,\
+\t                              unsigned int*, unsigned short*, unsigned short*);\
+\tentry->audio_buffer_len = bridge_decode_audio(raop_buffer->phandle, packetbuf, payloadsize,\
+\t                                              entry->audio_buffer, entry->audio_buffer_size,\
+\t                                              \&entry->sample_rate, \&entry->channels,\
+\t                                              \&entry->bits_per_sample);\
+#ifdef DUMP_AUDIO' "$BUF"
+fi
+grep -q 'overlay: decode per the negotiated format' "$BUF" || {
+  echo "  ERROR: could not patch the audio decode block (upstream changed?)"; exit 1; }
+if grep -q 'aacDecoder_DecodeFrame(raop_buffer->phandle' "$BUF"; then
+  echo "  ERROR: the old AAC decode block survived the patch"; exit 1
+fi
+echo "==> upstream patches applied"
 
 # Deliberately no -I external/ffmpeg/include: a stray libav* include should
 # fail the build rather than quietly restore the dependency we just removed.
@@ -123,7 +158,7 @@ mkdir -p "$OBJ"
 
 core_srcs=$(grep -o '<ClCompile Include="[^"]*"' "$CORE_VCX" | sed 's/<ClCompile Include="//;s/"//')
 dll_srcs=$(grep -o '<ClCompile Include="[^"]*"' "$DLL_VCX"  | sed 's/<ClCompile Include="//;s/"//')
-dll_srcs="$dll_srcs src/Bridge.cpp"
+dll_srcs="$dll_srcs src/Bridge.cpp src/BridgeAudio.cpp vendor/alac.c"
 
 echo "==> compiling core lib ($(echo "$core_srcs" | wc -w) files)..."
 i=0
