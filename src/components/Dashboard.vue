@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { toast } from 'vue-sonner'
 import { Button } from '@/components/ui/button'
 import { Settings as SettingsIcon, Radio, Square } from 'lucide-vue-next'
@@ -8,27 +8,19 @@ import MirrorCanvas from '@/components/MirrorCanvas.vue'
 import StatusBar from '@/components/StatusBar.vue'
 import SettingsDialog from '@/components/SettingsDialog.vue'
 
-const { status, start, stop, refresh, saveSettings } = useReceiver()
+const { status, start, stop, refresh, saveSettings, ensureListeners } = useReceiver()
 const settingsOpen = ref(false)
 const starting = ref(false)
-// Startup readiness gate. Loading the native protocol DLL during the first
-// couple of seconds after launch (while the app/WebView2 is still initializing)
-// crashes the process; the same load is safe once things settle. So we block
-// "开始接收" briefly on startup — this automates the "wait a few seconds"
-// workaround. Tune READY_DELAY_MS if a slow machine still crashes on first click.
-const ready = ref(false)
-const READY_DELAY_MS = 3500
-let readyTimer: number | null = null
+// "开始接收" waits until the backend reports the native library loaded, rather
+// than on a fixed delay. Loading it used to wedge the process if done while the
+// app was still coming up — that was the bundled Cygwin FFmpeg DLLs, which this
+// build no longer has — and the backend now loads it at startup in a few
+// milliseconds, so this is normally true before the window is even painted.
+const ready = computed(() => status.value.libReady)
 
-onMounted(() => {
-  refresh()
-  readyTimer = window.setTimeout(() => {
-    ready.value = true
-  }, READY_DELAY_MS)
-})
-
-onUnmounted(() => {
-  if (readyTimer != null) window.clearTimeout(readyTimer)
+onMounted(async () => {
+  await ensureListeners()
+  await refresh()
 })
 
 async function onStart() {

@@ -15,6 +15,7 @@ const status = ref<ReceiverStatus>({
   demo: false,
   saveDir: '',
   mirrorLibPresent: false,
+  libReady: false,
   enableAudio: false,
   width: 0,
   height: 0,

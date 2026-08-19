@@ -18,11 +18,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(state)
         .setup(|app| {
-            // Probe for the native protocol DLL so the frontend can show
-            // whether real mirroring is available before the user starts.
-            let present = crate::ffi::locate_dll(app.handle()).is_some();
             let st = app.state::<Arc<AppState>>();
-            *st.mirror_lib_present.lock().unwrap() = present;
 
             // Restore what the user last chose. Anything never saved keeps its
             // default, and the save directory falls back to system Downloads.
@@ -34,13 +30,41 @@ pub fn run() {
             *st.height.lock().unwrap() = saved.height;
             *st.fps.lock().unwrap() = saved.fps;
 
-            let mut save_dir = st.save_dir.lock().unwrap();
-            *save_dir = saved.save_dir;
-            if save_dir.is_empty() {
-                if let Ok(downloads) = app.path().download_dir() {
-                    *save_dir = downloads.to_string_lossy().to_string();
+            {
+                let mut save_dir = st.save_dir.lock().unwrap();
+                *save_dir = saved.save_dir;
+                if save_dir.is_empty() {
+                    if let Ok(downloads) = app.path().download_dir() {
+                        *save_dir = downloads.to_string_lossy().to_string();
+                    }
                 }
             }
+
+            // Load the native library now, off the UI thread, and tell the
+            // frontend when it is done. "开始接收" waits on this instead of on
+            // a fixed delay, so it lights up as soon as the library is actually
+            // usable — measured in milliseconds — and a start no longer pays
+            // for the load.
+            let handle = app.handle().clone();
+            std::thread::spawn(move || {
+                let outcome = crate::ffi::preload(&handle);
+                let state = handle.state::<Arc<AppState>>();
+                match &outcome {
+                    Ok(took) => {
+                        eprintln!("[startup] protocol library ready in {took:?}");
+                        *state.mirror_lib_present.lock().unwrap() = true;
+                    }
+                    Err(e) => {
+                        eprintln!("[startup] protocol library unavailable: {e}");
+                        *state.mirror_lib_present.lock().unwrap() = false;
+                    }
+                }
+                // Ready either way: the button unblocks, and a start with a
+                // broken library reports the real reason rather than silently
+                // staying greyed out forever.
+                *state.lib_ready.lock().unwrap() = true;
+                commands::emit_status(&handle, state.inner());
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

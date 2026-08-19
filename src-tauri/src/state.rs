@@ -20,6 +20,10 @@ pub struct AppState {
     pub save_dir: Mutex<String>,
     /// Whether the native protocol DLL was located at startup.
     pub mirror_lib_present: Mutex<bool>,
+    /// Whether the startup probe has finished loading (or failing to load) the
+    /// native library. The UI keeps "开始接收" disabled until it has, which is
+    /// the real precondition the old fixed startup delay was guessing at.
+    pub lib_ready: Mutex<bool>,
     /// Play the device's audio as well as its screen. Off by default.
     pub enable_audio: Mutex<bool>,
     /// Requested capture size / rate (0 = let the library decide). Kept here so
@@ -42,6 +46,7 @@ impl Default for AppState {
             demo: Mutex::new(false),
             save_dir: Mutex::new(String::new()),
             mirror_lib_present: Mutex::new(false),
+            lib_ready: Mutex::new(false),
             enable_audio: Mutex::new(false),
             width: Mutex::new(0),
             height: Mutex::new(0),

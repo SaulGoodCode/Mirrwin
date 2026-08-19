@@ -47,6 +47,7 @@ pub fn read_status(state: &Arc<AppState>) -> ReceiverStatus {
         demo: *state.demo.lock().unwrap(),
         save_dir: state.save_dir.lock().unwrap().clone(),
         mirror_lib_present: *state.mirror_lib_present.lock().unwrap(),
+        lib_ready: *state.lib_ready.lock().unwrap(),
         enable_audio: *state.enable_audio.lock().unwrap(),
         width: *state.width.lock().unwrap(),
         height: *state.height.lock().unwrap(),

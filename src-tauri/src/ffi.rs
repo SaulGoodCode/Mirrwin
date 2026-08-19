@@ -397,6 +397,24 @@ pub fn stop_mirror() -> Result<(), String> {
     Ok(())
 }
 
+/// Load the protocol DLL ahead of time.
+///
+/// The receiver used to be blocked behind a fixed delay after launch because
+/// loading the library while the app was still coming up would wedge the
+/// process. That was the bundled Cygwin-built FFmpeg DLLs: `msys-2.0.dll` does
+/// substantial work in its `DllMain`, under the loader lock, while WebView2 is
+/// busy loading its own libraries. Nothing in this build imports them, so the
+/// load is cheap and can simply be done up front — which turns "wait and hope"
+/// into a fact the UI can wait on.
+///
+/// Returns how long the load took, for the startup log.
+pub fn preload(app: &AppHandle) -> Result<std::time::Duration, String> {
+    let started = std::time::Instant::now();
+    let path = locate_dll(app).ok_or_else(|| "未找到协议库 DLL".to_string())?;
+    load_dll(&path)?;
+    Ok(started.elapsed())
+}
+
 /// Locate the protocol library inside the app's bundled resources.
 ///
 /// Looks for a few common names so the user doesn't have to rename precisely.

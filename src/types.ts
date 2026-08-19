@@ -22,6 +22,8 @@ export interface ReceiverStatus {
   saveDir: string
   /** Whether the native protocol DLL was found (real mode usable). */
   mirrorLibPresent: boolean
+  /** Whether the startup probe finished loading the native library. */
+  libReady: boolean
   /** Whether the device's audio is played alongside the picture. */
   enableAudio: boolean
   /** Last chosen capture size / rate (0 = let the library decide). */

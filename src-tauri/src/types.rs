@@ -16,6 +16,9 @@ pub struct ReceiverStatus {
     pub save_dir: String,
     /// Whether the native protocol DLL was found and can be used.
     pub mirror_lib_present: bool,
+    /// Whether the startup probe has finished. The start button waits on
+    /// this rather than on a fixed delay.
+    pub lib_ready: bool,
     /// Whether the device's audio is played alongside the picture. Off by
     /// default: mirroring is useful without it and it costs extra traffic.
     pub enable_audio: bool,
