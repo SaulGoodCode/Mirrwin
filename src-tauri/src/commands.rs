@@ -6,6 +6,7 @@ use tauri::ipc::Channel;
 use tauri::{AppHandle, Emitter, State};
 
 use crate::ffi;
+use crate::settings::{self, Settings};
 use crate::state::AppState;
 use crate::types::{ReceiverStatus, StartOptions};
 
@@ -47,7 +48,78 @@ pub fn read_status(state: &Arc<AppState>) -> ReceiverStatus {
         save_dir: state.save_dir.lock().unwrap().clone(),
         mirror_lib_present: *state.mirror_lib_present.lock().unwrap(),
         enable_audio: *state.enable_audio.lock().unwrap(),
+        width: *state.width.lock().unwrap(),
+        height: *state.height.lock().unwrap(),
+        fps: *state.fps.lock().unwrap(),
     }
+}
+
+/// Snapshot the persistable part of the state.
+fn read_settings(state: &Arc<AppState>) -> Settings {
+    Settings {
+        device_name: state.device_name.lock().unwrap().clone(),
+        port: *state.port.lock().unwrap(),
+        save_dir: state.save_dir.lock().unwrap().clone(),
+        enable_audio: *state.enable_audio.lock().unwrap(),
+        width: *state.width.lock().unwrap(),
+        height: *state.height.lock().unwrap(),
+        fps: *state.fps.lock().unwrap(),
+    }
+}
+
+/// Copy whatever the caller supplied into the shared state. Absent fields are
+/// left alone, so a partial update (starting with only a device name) does not
+/// wipe the rest.
+fn apply_options(state: &Arc<AppState>, options: &StartOptions) {
+    if let Some(name) = &options.device_name {
+        *state.device_name.lock().unwrap() = name.clone();
+    }
+    if let Some(p) = options.port {
+        *state.port.lock().unwrap() = p;
+    }
+    if let Some(d) = options.demo {
+        *state.demo.lock().unwrap() = d;
+    }
+    if let Some(dir) = &options.save_dir {
+        if !dir.is_empty() {
+            *state.save_dir.lock().unwrap() = dir.clone();
+        }
+    }
+    if let Some(a) = options.enable_audio {
+        *state.enable_audio.lock().unwrap() = a;
+    }
+    if let Some(w) = options.width {
+        *state.width.lock().unwrap() = w;
+    }
+    if let Some(h) = options.height {
+        *state.height.lock().unwrap() = h;
+    }
+    if let Some(f) = options.fps {
+        *state.fps.lock().unwrap() = f;
+    }
+}
+
+/// Persist the current settings. Called on every change the user confirms, so
+/// preferences survive a restart without a separate "apply" step.
+fn persist(app: &AppHandle, state: &Arc<AppState>) {
+    settings::save(app, &read_settings(state));
+}
+
+/// Save settings without touching the receiver.
+///
+/// The dialog needs this because changing settings while stopped previously
+/// only updated the frontend's copy: nothing reached the backend until the next
+/// start, so it was forgotten on exit.
+#[tauri::command]
+pub async fn update_settings(
+    options: StartOptions,
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<ReceiverStatus, String> {
+    apply_options(state.inner(), &options);
+    persist(&app, state.inner());
+    emit_status(&app, state.inner());
+    Ok(read_status(state.inner()))
 }
 
 pub fn emit_status(app: &AppHandle, state: &Arc<AppState>) {
@@ -66,23 +138,8 @@ pub async fn start_mirror(
         return Err("接收器已经在运行".to_string());
     }
 
-    if let Some(name) = options.device_name {
-        *state.device_name.lock().unwrap() = name;
-    }
-    if let Some(p) = options.port {
-        *state.port.lock().unwrap() = p;
-    }
-    if let Some(d) = options.demo {
-        *state.demo.lock().unwrap() = d;
-    }
-    if let Some(dir) = options.save_dir {
-        if !dir.is_empty() {
-            *state.save_dir.lock().unwrap() = dir;
-        }
-    }
-    if let Some(a) = options.enable_audio {
-        *state.enable_audio.lock().unwrap() = a;
-    }
+    apply_options(state.inner(), &options);
+    persist(&app, state.inner());
 
     let demo = *state.demo.lock().unwrap();
 
@@ -108,9 +165,11 @@ pub async fn start_mirror(
 
     let name = state.device_name.lock().unwrap().clone();
     let port = *state.port.lock().unwrap();
-    let width = options.width.unwrap_or(0);
-    let height = options.height.unwrap_or(0);
-    let fps = options.fps.unwrap_or(0);
+    // Read back from the state, not the options: a start with no size given
+    // should still use whatever the user last chose.
+    let width = *state.width.lock().unwrap();
+    let height = *state.height.lock().unwrap();
+    let fps = *state.fps.lock().unwrap();
     // The frontend always opens an audio channel; handing it to the FFI layer
     // is what actually turns audio on, so a disabled session costs nothing.
     let audio = if *state.enable_audio.lock().unwrap() {

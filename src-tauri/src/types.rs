@@ -19,6 +19,10 @@ pub struct ReceiverStatus {
     /// Whether the device's audio is played alongside the picture. Off by
     /// default: mirroring is useful without it and it costs extra traffic.
     pub enable_audio: bool,
+    /// Last chosen capture size / rate (0 = let the library decide).
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

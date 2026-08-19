@@ -8,7 +8,7 @@ import MirrorCanvas from '@/components/MirrorCanvas.vue'
 import StatusBar from '@/components/StatusBar.vue'
 import SettingsDialog from '@/components/SettingsDialog.vue'
 
-const { status, start, stop, refresh } = useReceiver()
+const { status, start, stop, refresh, saveSettings } = useReceiver()
 const settingsOpen = ref(false)
 const starting = ref(false)
 // Startup readiness gate. Loading the native protocol DLL during the first
@@ -54,14 +54,18 @@ async function onStop() {
 
 async function onSaveSettings(opts: { deviceName: string; port: number; saveDir: string; width: number; height: number; fps: number; enableAudio: boolean }) {
   const wasRunning = status.value.running
-  if (wasRunning) stop()
-  status.value.deviceName = opts.deviceName
-  status.value.port = opts.port
-  status.value.saveDir = opts.saveDir
-  status.value.enableAudio = opts.enableAudio
+  if (wasRunning) await stop()
+  // Persist first: this is the only path that reaches the backend when the
+  // receiver is stopped, and it is what makes settings survive a restart.
+  try {
+    await saveSettings(opts)
+  } catch (e) {
+    toast.error(`保存设置失败：${String(e)}`)
+    return
+  }
   if (wasRunning) {
     try {
-      await start({ deviceName: opts.deviceName, port: opts.port, saveDir: opts.saveDir, width: opts.width, height: opts.height, fps: opts.fps, enableAudio: opts.enableAudio })
+      await start(opts)
     } catch (e) {
       toast.error(`启动失败：${String(e)}`)
     }

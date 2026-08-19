@@ -16,6 +16,9 @@ const status = ref<ReceiverStatus>({
   saveDir: '',
   mirrorLibPresent: false,
   enableAudio: false,
+  width: 0,
+  height: 0,
+  fps: 0,
 })
 const logs = ref<string[]>([])
 // True while a live picture is actually being shown (frames decoding). Distinct
@@ -122,5 +125,20 @@ export function useReceiver() {
     status.value = await invoke<ReceiverStatus>('stop_mirror')
   }
 
-  return { status, logs, mirroring, refresh, start, stop, subscribeFrames, ensureListeners }
+  /** Persist settings without starting or stopping the receiver. */
+  async function saveSettings(opts: StartOptions) {
+    status.value = await invoke<ReceiverStatus>('update_settings', { options: opts })
+  }
+
+  return {
+    status,
+    logs,
+    mirroring,
+    refresh,
+    start,
+    stop,
+    saveSettings,
+    subscribeFrames,
+    ensureListeners,
+  }
 }

@@ -22,20 +22,40 @@ const { status } = useReceiver()
 const deviceName = ref(status.value.deviceName)
 const port = ref(status.value.port)
 const saveDir = ref(status.value.saveDir)
-const width = ref(0)
-const height = ref(0)
-const fps = ref(0)
+const width = ref(status.value.width)
+const height = ref(status.value.height)
+const fps = ref(status.value.fps)
 const enableAudio = ref(status.value.enableAudio)
 
+// The dialog is kept mounted, so re-open shows the last saved values rather
+// than whatever was typed and cancelled.
 watch(
   () => status.value,
   (s) => {
     deviceName.value = s.deviceName
     port.value = s.port
     saveDir.value = s.saveDir
+    width.value = s.width
+    height.value = s.height
+    fps.value = s.fps
     enableAudio.value = s.enableAudio
   },
   { deep: true },
+)
+
+watch(
+  () => props.open,
+  (open) => {
+    if (!open) return
+    const s = status.value
+    deviceName.value = s.deviceName
+    port.value = s.port
+    saveDir.value = s.saveDir
+    width.value = s.width
+    height.value = s.height
+    fps.value = s.fps
+    enableAudio.value = s.enableAudio
+  },
 )
 
 async function pickDir() {

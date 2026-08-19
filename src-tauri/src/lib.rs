@@ -1,5 +1,6 @@
 mod commands;
 mod ffi;
+mod settings;
 mod state;
 mod types;
 
@@ -20,17 +21,24 @@ pub fn run() {
             // Probe for the native protocol DLL so the frontend can show
             // whether real mirroring is available before the user starts.
             let present = crate::ffi::locate_dll(app.handle()).is_some();
-            *app.state::<Arc<AppState>>()
-                .mirror_lib_present
-                .lock()
-                .unwrap() = present;
-            // Default the screenshot/recording directory to the system Downloads
-            // folder (only if the user hasn't already chosen one).
-            if let Ok(downloads) = app.path().download_dir() {
-                let st = app.state::<Arc<AppState>>();
-                let mut sd = st.save_dir.lock().unwrap();
-                if sd.is_empty() {
-                    *sd = downloads.to_string_lossy().to_string();
+            let st = app.state::<Arc<AppState>>();
+            *st.mirror_lib_present.lock().unwrap() = present;
+
+            // Restore what the user last chose. Anything never saved keeps its
+            // default, and the save directory falls back to system Downloads.
+            let saved = crate::settings::load(app.handle());
+            *st.device_name.lock().unwrap() = saved.device_name;
+            *st.port.lock().unwrap() = saved.port;
+            *st.enable_audio.lock().unwrap() = saved.enable_audio;
+            *st.width.lock().unwrap() = saved.width;
+            *st.height.lock().unwrap() = saved.height;
+            *st.fps.lock().unwrap() = saved.fps;
+
+            let mut save_dir = st.save_dir.lock().unwrap();
+            *save_dir = saved.save_dir;
+            if save_dir.is_empty() {
+                if let Ok(downloads) = app.path().download_dir() {
+                    *save_dir = downloads.to_string_lossy().to_string();
                 }
             }
             Ok(())
@@ -39,6 +47,7 @@ pub fn run() {
             commands::start_mirror,
             commands::stop_mirror,
             commands::get_status,
+            commands::update_settings,
             commands::save_screenshot,
             commands::save_recording,
             commands::open_path,

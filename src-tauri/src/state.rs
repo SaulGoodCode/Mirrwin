@@ -22,6 +22,11 @@ pub struct AppState {
     pub mirror_lib_present: Mutex<bool>,
     /// Play the device's audio as well as its screen. Off by default.
     pub enable_audio: Mutex<bool>,
+    /// Requested capture size / rate (0 = let the library decide). Kept here so
+    /// the settings dialog can show what was last chosen.
+    pub width: Mutex<u32>,
+    pub height: Mutex<u32>,
+    pub fps: Mutex<u32>,
 }
 
 impl Default for AppState {
@@ -38,6 +43,9 @@ impl Default for AppState {
             save_dir: Mutex::new(String::new()),
             mirror_lib_present: Mutex::new(false),
             enable_audio: Mutex::new(false),
+            width: Mutex::new(0),
+            height: Mutex::new(0),
+            fps: Mutex::new(0),
         }
     }
 }

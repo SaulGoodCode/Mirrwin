@@ -24,6 +24,10 @@ export interface ReceiverStatus {
   mirrorLibPresent: boolean
   /** Whether the device's audio is played alongside the picture. */
   enableAudio: boolean
+  /** Last chosen capture size / rate (0 = let the library decide). */
+  width: number
+  height: number
+  fps: number
 }
 
 export interface StartOptions {
